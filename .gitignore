@@ -1,0 +1,9 @@
+# 密钥与环境配置
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
