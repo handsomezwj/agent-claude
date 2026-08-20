@@ -51,4 +51,5 @@
 - ✅ 第十课已接进 agent：`agent-claude.py` 每次调 API 前 `trim_history(messages, CONTEXT_BUDGET=40000)`，`test_real_agent.py` 验证不破坏原护栏。
 - ✅ 第九课已接进 agent：每轮回答完请裁判打分（`judge_last_turn`，`CLAUDE_USE_JUDGE=false` 可关），`test_real_agent.py` 剧本 5 验证。
 - ✅ 第十一课完成：摘要压缩（`summarize.py` + `test_summarize.py` + `08-summarize.py`），trim 的进阶——旧对话浓缩成摘要而不是扔掉。
-- 收尾：把摘要压缩接进 `agent-claude.py`（替代现在的纯 trim，或两层混用：最近全文 + 更早摘要）。
+- ✅ 第十一课已接进 agent：`agent-claude.py` 上下文管理默认走摘要模式（`CLAUDE_USE_SUMMARY=false` 退回纯裁剪），`test_real_agent.py` 验证不破坏原护栏。
+- 收尾：十一课全部完成，作品集已同步 GitHub。

@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent / "learn-agent"))
 from spin_guard import make_fingerprint, track_repeat
 from context import trim_history
 from llm_judge import judge_answer
+from summarize import replace_with_summary
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -67,6 +68,9 @@ CONTEXT_BUDGET = 40000
 
 # --- 裁判护栏（第九课）：这轮回答完，请一台 LLM 打分（可关：CLAUDE_USE_JUDGE=false）---
 USE_JUDGE = os.environ.get("CLAUDE_USE_JUDGE", "true").lower() == "true"
+
+# --- 摘要护栏（第十一课）：超预算时把最老对话压成摘要，而不是纯扔掉（可关：CLAUDE_USE_SUMMARY=false）---
+USE_SUMMARY = os.environ.get("CLAUDE_USE_SUMMARY", "true").lower() == "true"
 
 
 # --- 清理非法 surrogate 字符 ---
@@ -335,9 +339,14 @@ def handle_user_turn(messages):
             print("[护栏] 绕了太多圈，请换个说法再试。")
             return "MAX_ITERS"
 
-        # 上下文护栏：messages 无脑累积，这里每次发出去前先裁到预算以内
-        # （只丢最老的消息、永远保住最后一条；不改动 messages 本体）
-        trimmed = trim_history(messages, CONTEXT_BUDGET)
+        # 上下文护栏：messages 无脑累积，这里每次发出去前先压到预算以内
+        # （预算够则原样不动、不花一分钱；超预算才动手）
+        if USE_SUMMARY:
+            # 摘要模式：最老的对话压成摘要而不是扔掉（要花一次摘要的 API 钱）
+            trimmed, _ = replace_with_summary(messages, CONTEXT_BUDGET, client)
+        else:
+            # 纯裁剪模式：不花钱，但最老的直接扔
+            trimmed = trim_history(messages, CONTEXT_BUDGET)
         kwargs = dict(
             model=MODEL,
             max_tokens=MAX_TOKENS,

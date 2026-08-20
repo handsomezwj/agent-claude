@@ -12,6 +12,7 @@
 - **SkillLoader 技能系统**：`skills/` 目录下 Markdown 知识库自动加载，按需注入
 - **Agent 护栏**：最大 6 轮迭代兜底；连续 3 次「同工具同参数」判定打转自动刹车（复用经属性检查保护的 `spin_guard` 逻辑）；上下文超预算自动裁剪、永远保住最近对话（`context.py`）
 - **LLM 质量裁判**：每轮回答后调用独立 LLM 按 0-5 评分标准打分，优雅降级不拖垮主循环（`llm_judge.py`，`CLAUDE_USE_JUDGE` 可关）
+- **上下文摘要压缩**：窗口超预算时把最老对话浓缩成摘要而非粗暴丢弃，保留早期上下文（`summarize.py`，`CLAUDE_USE_SUMMARY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，第三方端点不支持 thinking 参数时自动降级重试，兼容 OpenAI / Qwen / Claude 多模型
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 - **自动化测试**：35+ 测试用例 + 500 条随机序列属性测试（工具循环、护栏、Mock 验证、裁判打分、上下文裁剪、摘要压缩）
@@ -38,6 +39,7 @@ python agent-claude.py
 | `CLAUDE_MAX_TOKENS` | 最大输出 token | `16000` |
 | `ANTHROPIC_USE_THINKING` | 启用 adaptive thinking | `false` |
 | `CLAUDE_USE_JUDGE` | 每轮回答后是否请 LLM 裁判打分 | `true` |
+| `CLAUDE_USE_SUMMARY` | 上下文超预算时是否用摘要压缩而非直接裁剪 | `true` |
 
 ## 项目结构
 
