@@ -50,10 +50,22 @@ o4, c4 = run("剧本 4 · 绕不出来", [
     for s in ["python", "git", "shell", "python", "git", "shell"]
 ], "挨个加载")
 
+# 剧本 5：裁判打分（第九课）——END_TURN 后 judge_last_turn 用假裁判给 4/5
+print("\n===== 剧本 5 · 裁判打分 =====")
+agent.client = FakeModel([
+    FakeResponse("end_turn", [text_block("你好，我是 lcc。")]),  # ① agent 的回答
+    FakeResponse("end_turn", [text_block("4/5\n不错")]),          # ② 裁判的分数
+])
+msgs = [{"role": "user", "content": "你好"}]
+o5 = agent.handle_user_turn(msgs)
+s5 = agent.judge_last_turn(msgs)
+print(f"→ 这轮结束：{o5}，裁判打分：{s5}/5（假模型共被调 {agent.client.calls} 次）")
+
 # 3) 裁判：护栏必须真的拦住
 assert o1 == "END_TURN", f"剧本1 应 END_TURN，实际 {o1}"
 assert o2 == "END_TURN" and c2 == 2, f"剧本2 应 2 次结束，实际 {o2}/{c2}"
 assert o3 == "STUCK" and c3 == 3, f"剧本3 应第 3 次刹车，实际 {o3}/{c3}"
 assert o4 == "MAX_ITERS" and c4 == 6, f"剧本4 应 6 圈兜底，实际 {o4}/{c4}"
+assert o5 == "END_TURN" and s5 == 4, f"剧本5 应 END_TURN 且裁判给 4 分，实际 {o5}/{s5}"
 
-print("\n✅ 四个剧本全部符合预期——你真正的 agent 现在有护栏了。")
+print("\n✅ 五个剧本全部符合预期——你真正的 agent 现在有护栏和裁判了。")

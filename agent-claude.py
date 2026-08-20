@@ -40,6 +40,8 @@ load_dotenv(Path(__file__).parent / ".env")
 # 生产项目里 spin_guard 应该是一个独立包；课程里先直接借课程目录的。
 sys.path.insert(0, str(Path(__file__).parent / "learn-agent"))
 from spin_guard import make_fingerprint, track_repeat
+from context import trim_history
+from llm_judge import judge_answer
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -58,6 +60,13 @@ USE_THINKING = os.environ.get("ANTHROPIC_USE_THINKING", "false").lower() == "tru
 # --- 护栏（第三、四课）：兜底圈数 + 打转阈值 ---
 MAX_ITERS = 6       # 一轮最多 6 圈，第 7 圈检查就拦住，不白打
 MAX_REPEATS = 3     # 同一工具 + 同样参数连用 3 次 = 打转，刹车
+
+# --- 上下文护栏（第十课）：每次发 API 前，把输入裁到预算以内 ---
+# 预留 16000 给输出 + 一点给 system/tools，剩下的才是输入能占的。
+CONTEXT_BUDGET = 40000
+
+# --- 裁判护栏（第九课）：这轮回答完，请一台 LLM 打分（可关：CLAUDE_USE_JUDGE=false）---
+USE_JUDGE = os.environ.get("CLAUDE_USE_JUDGE", "true").lower() == "true"
 
 
 # --- 清理非法 surrogate 字符 ---
@@ -326,12 +335,15 @@ def handle_user_turn(messages):
             print("[护栏] 绕了太多圈，请换个说法再试。")
             return "MAX_ITERS"
 
+        # 上下文护栏：messages 无脑累积，这里每次发出去前先裁到预算以内
+        # （只丢最老的消息、永远保住最后一条；不改动 messages 本体）
+        trimmed = trim_history(messages, CONTEXT_BUDGET)
         kwargs = dict(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
-            messages=sanitize(messages),
+            messages=sanitize(trimmed),
         )
         if USE_THINKING:
             kwargs["thinking"] = {"type": "adaptive"}
@@ -424,6 +436,43 @@ def handle_user_turn(messages):
             return "OTHER"
 
 
+def judge_last_turn(messages):
+    """第九课的裁判：这轮回答完了，请一台 LLM 给回答打 0-5 分（质量护栏）。
+
+    只做最朴素的事：抽出"最近的问题 + 最近的回答"，请裁判打分。
+    打不出分（模型跑了、格式跑偏）就优雅降级，绝不让主循环崩。
+    返回分数；打不出来返回 None。
+    """
+    # 最近的问题是"最后一条纯文本 user 消息"（工具循环的 tool_result 不算）
+    task = next(
+        (m["content"] for m in reversed(messages)
+         if m.get("role") == "user" and isinstance(m.get("content"), str)),
+        "",
+    )
+    # 最近的回答是"最后一条带文字的 assistant 消息"
+    reply = ""
+    for m in reversed(messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        texts = (
+            [b.text for b in content if getattr(b, "type", None) == "text"]
+            if isinstance(content, list) else []
+        )
+        if texts:
+            reply = "\n".join(texts)
+            break
+    if not task or not reply:
+        return None
+    try:
+        score, judge_text = judge_answer(client, task, reply)
+        print(f"[裁判] 这轮回答 {score}/5 → {judge_text[:60]}")
+        return score
+    except Exception as exc:
+        print(f"[裁判] 打分失败，跳过：{exc}")
+        return None
+
+
 def main():
     # Conversation history — Anthropic format uses content blocks
     messages: list[MessageParam] = []
@@ -449,7 +498,11 @@ def main():
         messages.append({"role": "user", "content": user_input})
 
         # 处理这一轮：工具循环 + 护栏，全在 handle_user_turn 里
-        handle_user_turn(messages)
+        outcome = handle_user_turn(messages)
+
+        # 裁判护栏（第九课）：这轮好好回答完，就请一台 LLM 打分
+        if outcome == "END_TURN" and USE_JUDGE:
+            judge_last_turn(messages)
 
 
 if __name__ == "__main__":
