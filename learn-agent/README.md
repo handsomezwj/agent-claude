@@ -1,6 +1,6 @@
 # Agent 开发入门课（代码目录）
 
-八课课程，从零开始带你写第一个 agent。每课一个文件，按顺序看。
+十一课课程，从零开始带你写第一个 agent。每课一个文件，按顺序看。
 
 ## 课程地图
 
@@ -18,6 +18,16 @@
 | `agent_loop.py` | 第 8 课 | 被测对象：抽成函数的循环 + 假模型 | — |
 | `05-mock-loop.py` | 第 8 课 | 假模型演戏：四个剧本看完整个循环 | `python 05-mock-loop.py` |
 | `test_loop.py` | 第 8 课 | eval：测整个循环（正常/工具/打转/兜底） | `python test_loop.py` |
+| `test_real_agent.py` | 终局 | eval：测**你自己的 agent** 的护栏（真文件+假模型） | `python test_real_agent.py` |
+| `llm_judge.py` | 第 9 课 | 被测对象：裁判模型（打分 + 抠分数） | — |
+| `06-llm-judge.py` | 第 9 课 | 真裁判给三份回答打分 | `python 06-llm-judge.py --fake` |
+| `test_judge.py` | 第 9 课 | eval：测抠分数 + 假裁判 | `python test_judge.py` |
+| `context.py` | 第 10 课 | 被测对象：估 token + 裁对话（上下文管理） | — |
+| `07-context.py` | 第 10 课 | 对话超窗演示：超预算 → 裁到放得下 | `python 07-context.py` |
+| `test_context.py` | 第 10 课 | eval：测估 token + 裁对话的边界 | `python test_context.py` |
+| `summarize.py` | 第 11 课 | 被测对象：摘要压缩（旧对话浓缩成便签，trim 的进阶） | — |
+| `08-summarize.py` | 第 11 课 | 摘要演示：超预算 → 浓缩成摘要而不是扔掉 | `python 08-summarize.py --fake` |
+| `test_summarize.py` | 第 11 课 | eval：测打包提示 + 假摘要模型 + 压缩替换 | `python test_summarize.py` |
 
 ## 怎么跑
 
@@ -35,5 +45,10 @@
 
 - ✅ 重构作业已完成：`04-spin-guard.py` 只借不抄——打转判断借 `spin_guard.py`，工具执行借 `agent_tools.py`。
 - ✅ 第八课完成：假模型测循环（`05-mock-loop.py` + `test_loop.py`），四个剧本免费看全护栏。
-- 测输出：模型自由文本回答需要"裁判模型"打分（LLM-judge），进阶。
-- 终局：给你自己的 `agent-claude.py` 加护栏 + 加 eval（把内层 `while True` 抽成函数，就能照第八课测）。
+- ✅ 终局完成：`agent-claude.py` 上了两道护栏，`test_real_agent.py` 证明它会拦（真文件+假模型，一分钱不花）。
+- ✅ 第九课完成：裁判模型（`llm_judge.py` + `test_judge.py`），测"回答质量"。
+- ✅ 第十课完成：上下文管理（`context.py` + `test_context.py` + `07-context.py`），防"聊太久超窗"。
+- ✅ 第十课已接进 agent：`agent-claude.py` 每次调 API 前 `trim_history(messages, CONTEXT_BUDGET=40000)`，`test_real_agent.py` 验证不破坏原护栏。
+- ✅ 第九课已接进 agent：每轮回答完请裁判打分（`judge_last_turn`，`CLAUDE_USE_JUDGE=false` 可关），`test_real_agent.py` 剧本 5 验证。
+- ✅ 第十一课完成：摘要压缩（`summarize.py` + `test_summarize.py` + `08-summarize.py`），trim 的进阶——旧对话浓缩成摘要而不是扔掉。
+- 收尾：把摘要压缩接进 `agent-claude.py`（替代现在的纯 trim，或两层混用：最近全文 + 更早摘要）。

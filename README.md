@@ -14,7 +14,7 @@
 - **LLM 质量裁判**：每轮回答后调用独立 LLM 按 0-5 评分标准打分，优雅降级不拖垮主循环（`llm_judge.py`，`CLAUDE_USE_JUDGE` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，第三方端点不支持 thinking 参数时自动降级重试，兼容 OpenAI / Qwen / Claude 多模型
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
-- **自动化测试**：30+ 测试用例 + 500 条随机序列属性测试（工具循环、护栏、Mock 验证、裁判打分、上下文裁剪）
+- **自动化测试**：35+ 测试用例 + 500 条随机序列属性测试（工具循环、护栏、Mock 验证、裁判打分、上下文裁剪、摘要压缩）
 
 ## 快速开始
 
@@ -52,6 +52,7 @@ python agent-claude.py
 │   ├── agent_loop.py  # 可测试的 Agent 循环核心
 │   ├── spin_guard.py  # 打转检测护栏
 │   ├── context.py     # 上下文裁剪护栏
+│   ├── summarize.py   # 摘要压缩（trim 的进阶，旧对话浓缩成便签）
 │   ├── llm_judge.py   # LLM 质量裁判
 │   └── test_*.py      # 自动化测试
 ├── requirements.txt   # 依赖
