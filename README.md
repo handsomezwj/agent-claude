@@ -1,6 +1,6 @@
 # 多工具 LLM Agent
 
-基于 Anthropic SDK 的交互式 AI Agent，从零手写，不依赖 LangChain 等上层框架。支持工具调用循环、四层生产护栏、流式输出、MCP 协议、RAG 检索增强、长记忆持久化与多端点兼容。
+基于 Anthropic SDK 从零手写的交互式 AI Agent —— 不依赖 LangChain 等上层框架。手写工具调用循环、四层生产护栏、流式输出、MCP 协议、RAG 检索增强、长记忆持久化，一套代码兼容 Anthropic 官方 / DeepSeek 等兼容端点。
 
 ## 功能特性
 
@@ -12,15 +12,15 @@
 - **SkillLoader 技能系统**：`skills/` 目录下 Markdown 知识库自动加载，按需注入
 - **四层生产护栏**：
   - 最大轮数兜底：迭代超过上限强制停（防死循环）
-  - 原地打转检测：连续「同工具同参数」自动刹车（`spin_guard.py`）
-  - 上下文超窗裁剪 + 摘要压缩：40k Token 超预算自动处理，永远保住最近对话（`context.py` + `summarize.py`）
-  - LLM 质量裁判：每轮回答后独立 LLM 按 0-5 打分，优雅降级不拖垮主循环（`llm_judge.py`）
+  - 原地打转检测：连续「同工具同参数」自动刹车
+  - 上下文超窗裁剪 + 摘要压缩：40k Token 超预算自动处理，永远保住最近对话
+  - LLM 质量裁判：每轮回答后独立 LLM 按 0-5 打分，优雅降级不拖垮主循环
 - **流式输出**：边生成边打字机吐字，实时体验（`CLAUDE_USE_STREAMING` 可关）
 - **MCP 协议接入**：工具不写死在代码里，通过 `CLAUDE_MCP_SERVER` 连一个独立小程序要工具（可关）
 - **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
-- **自动化测试**：176 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **自动化测试**：188 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
 ## 快速开始
@@ -68,33 +68,34 @@ python agent-claude.py
 │   ├── python.md
 │   ├── git.md
 │   └── shell.md
-├── learn-agent/       # Agent 开发课程（22 课 + 异步专项）：按课演示 + 可测模块 + 测试
-│   ├── agent_loop.py      # 可测试的 Agent 循环核心（含 FakeModel 假模型）
+├── learn-agent/       # 从零手写 Agent 的完整源码：每个能力 = 可测模块 + 可运行示例 + 测试
+│   ├── agent_loop.py      # Agent 循环核心（含 FakeModel 假模型，零成本测试）
 │   ├── spin_guard.py      # 打转检测护栏
 │   ├── context.py         # 上下文裁剪护栏
 │   ├── summarize.py       # 摘要压缩（旧对话浓缩成便签）
 │   ├── llm_judge.py       # LLM 质量裁判
 │   ├── memory_store.py    # 长记忆记事本（JSON 持久化，重启不忘）
-│   ├── embedding.py       # 向量嵌入（余弦相似度）
+│   ├── embedding.py       # 词袋向量嵌入（余弦相似度）
 │   ├── embedding_models.py# 真向量模型（bge 中文语义检索）
 │   ├── multi_agent.py     # 多 Agent 协作（写手 + 评审双脑）
 │   ├── prompting.py       # 提示词工程
-│   ├── async_utils.py     # 异步编程（串行 / 并发 gather / 限流 Semaphore）
-│   ├── 0x-*.py / 1x-*.py  # 按课编号的演示程序
-│   └── test_*.py          # 188 个 unittest
+│   ├── async_utils.py     # 异步编程（并发 gather / 限流 Semaphore）
+│   ├── *.py               # 每个能力的可运行示例
+│   ├── test_*.py          # 188 个 unittest（FakeModel，零成本）
+│   └── knowledge.md       # RAG 默认知识库
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
 ```
 
-## 学习路径（learn-agent/，22 课 + 异步专项）
+## 从零手写（learn-agent/）
 
-从零手写 Agent 的完整自研课程，每课 = 一个可运行演示 + 一个可测模块 + 一组测试：
+整个 Agent 不是拼装出来的，而是自底向上从零手写——每个能力都是**一个可独立测试的模块**，配一个可运行示例 + 一组测试，然后全部接进主程序 `agent-claude.py`，每个能力带环境变量开关，可独立启停：
 
-- **基础篇**：最小 Agent → 手写工具调用循环 → 四道护栏（兜底 / 打转 / 上下文 / 裁判）
-- **工程化篇**：上下文裁剪 + 摘要压缩、LLM-as-judge、FakeModel 假模型零成本自动化测试
-- **进阶能力篇**：流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、上线部署原理、异步编程（串行 / 并发 / 限流）
+- 手写工具调用循环（`stop_reason` 驱动多轮自主编排）
+- 四层护栏：最大轮数兜底 / 打转检测 / 上下文裁剪 + 摘要压缩 / LLM 质量裁判
+- 流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、异步编程
 
-全部能力逐课接进 `agent-claude.py`，每个能力都带环境变量开关，可独立启停、可测试。
+**每个模块 = 「怎么用」（示例）+「怎么保证不出错」（测试）**。全部能力接进成品后，用 `test_real_agent.py` 回归验证主程序护栏不被破坏。
 
 ## 测试
 
