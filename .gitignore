@@ -1,6 +1,11 @@
 # 密钥与环境配置
 .env
 
+# 私人数据：长记忆 + 简历（绝不进公开仓库）
+agent_memory.json
+kimi-改简历-现状简历.txt
+*.pdf
+
 # Python
 __pycache__/
 *.py[cod]

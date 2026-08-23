@@ -35,6 +35,34 @@ class FakeResponse:
         self.content = content
 
 
+class FakeStream:
+    """假流：模仿真 client.messages.stream(...) 的上下文管理器（第十四课）。
+
+    剧本 = 一个 FakeResponse。text_stream 把回答切成小片吐出来（演打字机），
+    get_final_message() 原样还回剧本 —— 里面有 stop_reason/content，
+    所以换成流式接口后，老循环的护栏判断一行都不用改。
+    """
+    def __init__(self, response, chunk_size=2):
+        self._response = response
+        text = "".join(b.text for b in response.content if b.type == "text")
+        self._frames = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @property
+    def text_stream(self):
+        """逐片吐文字；没有文字（比如工具循环）就一片都不吐"""
+        return iter(self._frames)
+
+    def get_final_message(self):
+        """流完，把完整剧本还回去——stop_reason/content 都在"""
+        return self._response
+
+
 class FakeModel:
     """假模型 = 一个剧本列表 + 一个计数器。
 
@@ -55,6 +83,14 @@ class FakeModel:
         resp = self.script[self.calls]
         self.calls += 1
         return resp
+
+    def stream(self, **kwargs):
+        """流式版：按剧本换一个假流回来。剧本照样每开一次消耗一句。"""
+        if self.calls >= len(self.script):
+            raise RuntimeError(f"剧本演完了！被调 {self.calls} 次，剧本只有 {len(self.script)} 句。")
+        resp = self.script[self.calls]
+        self.calls += 1
+        return FakeStream(resp)
 
 
 # ---------------------- 循环（抽成函数） ----------------------

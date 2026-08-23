@@ -43,6 +43,12 @@ from spin_guard import make_fingerprint, track_repeat
 from context import trim_history
 from llm_judge import judge_answer
 from summarize import replace_with_summary
+from streaming import run_stream
+from mcp_client import McpClient, StdioTransport
+from rag import chunk_text, retrieve_top_k as keyword_retrieve
+from embedding import BowEmbedder, build_vocab, retrieve_top_k as embed_retrieve
+from embedding_models import try_load_model, REAL_MIN_SIM
+from memory_store import MemoryStore, build_memory_prompt, remember_last_turn
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -71,6 +77,44 @@ USE_JUDGE = os.environ.get("CLAUDE_USE_JUDGE", "true").lower() == "true"
 
 # --- 摘要护栏（第十一课）：超预算时把最老对话压成摘要，而不是纯扔掉（可关：CLAUDE_USE_SUMMARY=false）---
 USE_SUMMARY = os.environ.get("CLAUDE_USE_SUMMARY", "true").lower() == "true"
+
+# --- 流式输出（第十四课）：边生成边打字机吐字，不憋一口气（可关：CLAUDE_USE_STREAMING=false）---
+USE_STREAMING = os.environ.get("CLAUDE_USE_STREAMING", "true").lower() == "true"
+
+# --- MCP 工具接入（第十五课）：工具不写死在代码里，问一个独立小程序要（可关：CLAUDE_USE_MCP=false）---
+# 配了 CLAUDE_MCP_SERVER（一条启动服务器的命令）才去连；连不上就优雅降级，只用内置工具。
+USE_MCP = os.environ.get("CLAUDE_USE_MCP", "true").lower() == "true"
+MCP_SERVER_COMMAND = os.environ.get("CLAUDE_MCP_SERVER", "").strip()
+
+# --- RAG 检索增强（第十六课）：提问前先在你自己的知识库里"检索最相关的几段"再回答 ---
+# 默认读 learn-agent/knowledge.md；可用 CLAUDE_RAG_FILE 指定别的文件；CLAUDE_USE_RAG=false 可关。
+USE_RAG = os.environ.get("CLAUDE_USE_RAG", "true").lower() == "true"
+CLAUDE_RAG_FILE = os.environ.get("CLAUDE_RAG_FILE", "").strip()
+RAG_TOP_K = int(os.environ.get("CLAUDE_RAG_TOP_K", "2"))
+RAG_CHUNK_SIZE = int(os.environ.get("CLAUDE_RAG_CHUNK_SIZE", "200"))
+RAG_CHUNKS: list[str] = []   # 加载好的知识块；空 = RAG 没开
+# --- 向量检索（第十七课）：默认开。把文字变向量、按余弦相似度找最像的块，比关键词打分更准。
+# 本地用"词袋向量"当假门（免费可复现）；起不来就优雅降级回第十六课的关键词打分。
+USE_EMBEDDING = os.environ.get("CLAUDE_USE_EMBEDDING", "true").lower() == "true"
+RAG_EMBEDDER = None            # BowEmbedder 或 ModelEmbedder 实例；None = 用关键词打分
+RAG_CHUNK_VECTORS: list = []   # 启动时算好每块的向量，提问时不再重算
+# --- 真向量模型（第十八课）：配了 CLAUDE_EMBEDDING_MODEL（如 BAAI/bge-small-zh-v1.5）
+# 就把检索从"词袋假门"升级成"真模型语义检索"。首次会下载 ~100MB，之后离线可用；
+# 加载失败自动回退假门，绝不崩。真模型没有"正好 0"，阈值要抬高（REAL_MIN_SIM）。
+CLAUDE_EMBEDDING_MODEL = os.environ.get("CLAUDE_EMBEDDING_MODEL", "").strip()
+RAG_MIN_SIM = 0.0              # 词袋假门用 0（撞不上 = 0）；真模型用 REAL_MIN_SIM
+
+# --- 长记忆（第二十一课）：把重要的事写进"记事本"文件，下次启动还记得（可关：CLAUDE_USE_MEMORY=false）
+# 模型失忆（第一课）、messages 只活在内存里，程序一关就清零——记事本把"关于用户的
+# 事实"落盘到 JSON 文件，启动时读回来贴进 system prompt。文件放在 agent-claude.py
+# 旁边而不是 learn-agent/ 里，免得课程目录被用户隐私污染、误提交到 GitHub。
+USE_MEMORY = os.environ.get("CLAUDE_USE_MEMORY", "true").lower() == "true"
+MEMORY_FILE = os.environ.get("CLAUDE_MEMORY_FILE", "").strip() or str(
+    Path(__file__).parent / "agent_memory.json"
+)
+MEMORY_MAX_ITEMS = int(os.environ.get("CLAUDE_MEMORY_MAX_ITEMS", "50"))
+
+MEMORY: MemoryStore | None = None   # 记事本实例；None = 记忆没开
 
 
 # --- 清理非法 surrogate 字符 ---
@@ -193,6 +237,12 @@ TOOLS: list[ToolParam] = [
     },
 ]
 
+# 第十五课：MCP 连上后，把外部工具加进这份"实际发给模型的清单"。
+# 默认就是内置工具；connect_mcp() 连上服务器后替换成 内置 + 外部。
+ACTIVE_TOOLS: list[ToolParam] = list(TOOLS)
+MCP_CLIENT: McpClient | None = None
+MCP_TOOL_NAMES: set[str] = set()
+
 # ---------------------------------------------------------------------------
 # HTML text extractor (unchanged from original)
 # ---------------------------------------------------------------------------
@@ -291,6 +341,10 @@ def run_command(command: str) -> str:
 
 def execute_tool(name: str, args: dict) -> str:
     """Route a tool-use block to the correct implementation and return its result."""
+    # 第十五课：如果是 MCP 服务器提供的工具，交给它执行
+    if MCP_CLIENT is not None and name in MCP_TOOL_NAMES:
+        print(f"[MCP工具]: {name}({args})")
+        return MCP_CLIENT.call_tool(name, args)
     if name == "run_command":
         command = args["command"]
         print(f"[执行命令]: {command}")
@@ -323,6 +377,120 @@ def execute_tool(name: str, args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def connect_mcp():
+    """第十五课：启动时问 MCP 服务器"你有什么工具"，把它的工具加进清单。
+
+    优雅降级：服务器连不上 / 握手失败，就打一行日志，继续用内置工具——
+    绝不让 agent 崩。这就是 resume-advisor 那课学过的"优雅降级 ≠ 静默吞错"。
+    """
+    global ACTIVE_TOOLS, MCP_CLIENT, MCP_TOOL_NAMES
+    if not (USE_MCP and MCP_SERVER_COMMAND):
+        return
+    try:
+        client = McpClient(StdioTransport(MCP_SERVER_COMMAND))
+        client.handshake()
+        mcp_tools = client.list_tools()
+        MCP_CLIENT = client
+        MCP_TOOL_NAMES = {t["name"] for t in mcp_tools}
+        ACTIVE_TOOLS = TOOLS + mcp_tools
+        print(f"[MCP] 连上服务器，新增外部工具：{sorted(MCP_TOOL_NAMES)}")
+    except Exception as exc:
+        print(f"[MCP] 连接失败，只用内置工具：{exc}")
+        MCP_CLIENT = None
+        MCP_TOOL_NAMES = set()
+        ACTIVE_TOOLS = list(TOOLS)
+
+
+def connect_rag():
+    """第十六课：启动时加载你的知识库，切好块。之后提问前会先检索再回答。
+
+    优雅降级：没找到文件 / 读失败，就打一行日志，等于 RAG 没开，照常聊天。
+    """
+    global RAG_CHUNKS, RAG_EMBEDDER, RAG_CHUNK_VECTORS, RAG_MIN_SIM
+    if not USE_RAG:
+        return
+    path = CLAUDE_RAG_FILE or str(Path(__file__).parent / "learn-agent" / "knowledge.md")
+    if not os.path.exists(path):
+        print(f"[RAG] 没找到知识库 {path}，跳过（可用 CLAUDE_RAG_FILE 指定别的文件）")
+        return
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        RAG_CHUNKS = chunk_text(text, RAG_CHUNK_SIZE)
+        print(f"[RAG] 已加载知识库（{len(text)} 字 → {len(RAG_CHUNKS)} 块），提问时会先检索最相关的 {RAG_TOP_K} 块")
+    except Exception as exc:
+        print(f"[RAG] 加载失败，跳过：{exc}")
+        RAG_CHUNKS = []
+        return
+    # 第十七课：默认升级成向量检索（词袋假向量，免费可复现）；起不来就降级回关键词打分
+    if USE_EMBEDDING:
+        try:
+            vocab = build_vocab(RAG_CHUNKS)
+            RAG_EMBEDDER = BowEmbedder(vocab)
+            RAG_CHUNK_VECTORS = [RAG_EMBEDDER.embed(c) for c in RAG_CHUNKS]
+            RAG_MIN_SIM = 0.0
+            print(f"[RAG] 检索方式：向量余弦相似度（本地词袋向量，免费）")
+        except Exception as exc:
+            print(f"[RAG] 向量检索没起来，回退关键词打分：{exc}")
+            RAG_EMBEDDER = None
+            RAG_CHUNK_VECTORS = []
+            return
+        # 第十八课：配了真模型就换真门（语义检索，番茄能搜到西红柿）；换不上保持假门
+        if CLAUDE_EMBEDDING_MODEL and RAG_EMBEDDER is not None:
+            real, err = try_load_model(CLAUDE_EMBEDDING_MODEL)
+            if real is not None:
+                RAG_EMBEDDER = real
+                RAG_CHUNK_VECTORS = [real.embed(c) for c in RAG_CHUNKS]
+                RAG_MIN_SIM = REAL_MIN_SIM
+                print(f"[RAG] 检索方式已升级：真向量模型 {CLAUDE_EMBEDDING_MODEL}（{real.dim} 维，语义检索）")
+            else:
+                print(f"[RAG] 真模型加载失败，保持词袋假门：{err}")
+
+
+def connect_memory():
+    """第二十一课：启动时打开"记事本"，把以前存的事实读回来。
+
+    优雅降级：文件坏 / 读不了 → 空记忆照常聊，绝不让 agent 崩。
+    记事本打不开就这轮先不记（MEMORY = None），记忆是身外之物，命是主循环。
+    """
+    global MEMORY
+    if not USE_MEMORY:
+        return
+    try:
+        MEMORY = MemoryStore(MEMORY_FILE, max_items=MEMORY_MAX_ITEMS)
+        n = len(MEMORY.load())
+        print(f"[记忆] 记事本已打开（{n} 条旧记忆，存于 {MEMORY_FILE}）")
+    except Exception as exc:
+        print(f"[记忆] 打开失败，这轮先不记：{exc}")
+        MEMORY = None
+
+
+def build_system_text():
+    """system prompt + 长期记忆（第二十一课）。
+
+    记忆不是贴在 messages 里——system 每次发 API 都会被带上一份，
+    所以模型"一开场就知道你是谁"。记忆在 store 里，改一条，下一轮自动生效。
+    """
+    if MEMORY is None or not MEMORY.all():
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + "\n\n" + build_memory_prompt(MEMORY.all())
+
+
+def _call_model(kwargs):
+    """调一次模型：流式开 → 打字机逐字打；流式关 → 憋一次再打。
+
+    两条路都返回"完整 response"（stop_reason/content 一个不少）——
+    所以后面的护栏判断一行都不用改，这就是 get_final_message 的福利。
+    """
+    if not USE_STREAMING:
+        return client.messages.create(**kwargs)
+    reply, response = run_stream(
+        lambda: client.messages.stream(**kwargs),
+        on_chunk=lambda text: print(text, end="", flush=True),
+    )
+    print()  # 流式结束后补一个换行
+    return response
+
+
 def handle_user_turn(messages):
     """处理一轮用户输入，直到模型给出最终回答或护栏介入。
 
@@ -339,26 +507,21 @@ def handle_user_turn(messages):
             print("[护栏] 绕了太多圈，请换个说法再试。")
             return "MAX_ITERS"
 
-        # 上下文护栏：messages 无脑累积，这里每次发出去前先压到预算以内
-        # （预算够则原样不动、不花一分钱；超预算才动手）
-        if USE_SUMMARY:
-            # 摘要模式：最老的对话压成摘要而不是扔掉（要花一次摘要的 API 钱）
-            trimmed, _ = replace_with_summary(messages, CONTEXT_BUDGET, client)
-        else:
-            # 纯裁剪模式：不花钱，但最老的直接扔
-            trimmed = trim_history(messages, CONTEXT_BUDGET)
+        # 上下文护栏：messages 无脑累积，这里每次发出去前先裁到预算以内
+        # （只丢最老的消息、永远保住最后一条；不改动 messages 本体）
+        trimmed = trim_history(messages, CONTEXT_BUDGET)
         kwargs = dict(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
+            system=build_system_text(),   # 第二十一课：system prompt + 长期记忆
+            tools=ACTIVE_TOOLS,   # 第十五课：内置工具 + 可能连上的 MCP 外部工具
             messages=sanitize(trimmed),
         )
         if USE_THINKING:
             kwargs["thinking"] = {"type": "adaptive"}
 
         try:
-            response = client.messages.create(**kwargs)
+            response = _call_model(kwargs)
         except Exception as exc:
             err = str(exc)
             # DeepSeek 等端点不支持的参数，自动去掉 thinking 后重试
@@ -377,7 +540,9 @@ def handle_user_turn(messages):
                 b.text for b in response.content if b.type == "text"
             ]
             reply = "\n".join(text_blocks)
-            print(f"[Agent回答]: {reply}\n")
+            # 流式开：文字已一边生成一边打印；流式关：这里一次性打出来
+            if not USE_STREAMING:
+                print(f"[Agent回答]: {reply}\n")
             messages.append({
                 "role": "assistant",
                 "content": response.content,
@@ -435,9 +600,10 @@ def handle_user_turn(messages):
                 b.text for b in response.content if b.type == "text"
             ]
             reply = "\n".join(text_blocks)
-            if reply:
-                print(f"[Agent回答]: {reply}\n")
-            print(f"(stop_reason: {response.stop_reason})")
+            if not USE_STREAMING:
+                if reply:
+                    print(f"[Agent回答]: {reply}\n")
+                print(f"(stop_reason: {response.stop_reason})")
             messages.append({
                 "role": "assistant",
                 "content": response.content,
@@ -494,6 +660,15 @@ def main():
     print(f"Claude Agent 就绪 (模型: {MODEL})")
     print("输入消息与 Claude 对话，Ctrl+C 退出\n")
 
+    # 第十五课：问 MCP 服务器要外部工具（连不上就优雅降级，只用内置工具）
+    connect_mcp()
+
+    # 第十六课：加载知识库、切好块（没找到就优雅降级，等于没开 RAG）
+    connect_rag()
+
+    # 第二十一课：打开"记事本"，把以前存的事实读回来（打不开就这轮先不记）
+    connect_memory()
+
     while True:
         try:
             user_input = input("你：")
@@ -504,6 +679,24 @@ def main():
         if not user_input.strip():
             continue
 
+        # 第十六课：先在你自己的知识库里检索最相关的几块，塞在问题前面。
+        # 注意顺序：资料块必须在真问题【之前】——裁判护栏认"最后一条用户消息"是任务，
+        # 检索结果放前面才不会把"资料"当成要打分的那道题。
+        # 第十七课：默认用向量检索（词袋假向量，免费）；起不来就回退关键词打分。
+        if RAG_CHUNKS:
+            if RAG_EMBEDDER is not None:
+                context = embed_retrieve(
+                    user_input, RAG_CHUNKS, RAG_TOP_K,
+                    RAG_EMBEDDER.embed, chunk_vectors=RAG_CHUNK_VECTORS,
+                    min_sim=RAG_MIN_SIM,   # 第十八课：真模型没"正好 0"，阈值抬高
+                )
+            else:
+                context = keyword_retrieve(user_input, RAG_CHUNKS, RAG_TOP_K)
+            if context:
+                messages.append(
+                    {"role": "user", "content": "【检索到的资料，回答时优先参考】\n" + "\n\n".join(context)}
+                )
+
         messages.append({"role": "user", "content": user_input})
 
         # 处理这一轮：工具循环 + 护栏，全在 handle_user_turn 里
@@ -512,6 +705,13 @@ def main():
         # 裁判护栏（第九课）：这轮好好回答完，就请一台 LLM 打分
         if outcome == "END_TURN" and USE_JUDGE:
             judge_last_turn(messages)
+
+        # 长记忆（第二十一课）：这轮好好回答完了，把刚学到的事实写进记事本。
+        # 规则提取免费可测；生产可换成 LLM 提炼（extract_facts 的 extractor 门）。
+        if outcome == "END_TURN" and MEMORY is not None:
+            added = remember_last_turn(MEMORY, messages)
+            if added:
+                print(f"[记忆] 这轮记下 {added} 条新事实，写进了记事本")
 
 
 if __name__ == "__main__":

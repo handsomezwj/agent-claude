@@ -1,21 +1,27 @@
 # 多工具 LLM Agent
 
-基于 Anthropic SDK 的交互式 AI Agent，支持自定义工具调用、技能知识库动态加载与多端点兼容。从 DashScope/Qwen 迁移至 Anthropic SDK，手写 `while(stop_reason=="tool_use")` 工具调用闭环，不依赖 LangChain 等上层框架。
+基于 Anthropic SDK 的交互式 AI Agent，从零手写，不依赖 LangChain 等上层框架。支持工具调用循环、四层生产护栏、流式输出、MCP 协议、RAG 检索增强、长记忆持久化与多端点兼容。
 
 ## 功能特性
 
-- **手写工具调用循环**：基于 Anthropic SDK 实现多轮自主工具编排，不依赖上层框架
+- **手写工具调用循环**：基于 Anthropic SDK 实现 `while(stop_reason=="tool_use")` 多轮自主工具编排，不依赖上层框架，核心逻辑全透明可控
 - **3 个自定义工具**：
   - `run_command` — Shell 执行。默认 `shell=False` + `shlex` 参数拆解防注入，仅管道/重定向命令回退 `shell=True`
   - `web_fetch` — 网页抓取。HTML 智能文本抽取（自动跳过 script/nav/footer 噪声），严格 SSL 校验、超时与长度截断
   - `load_skill` — 技能知识库按需加载，注入 System Prompt 扩展 Agent 领域能力
 - **SkillLoader 技能系统**：`skills/` 目录下 Markdown 知识库自动加载，按需注入
-- **Agent 护栏**：最大 6 轮迭代兜底；连续 3 次「同工具同参数」判定打转自动刹车（复用经属性检查保护的 `spin_guard` 逻辑）；上下文超预算自动裁剪、永远保住最近对话（`context.py`）
-- **LLM 质量裁判**：每轮回答后调用独立 LLM 按 0-5 评分标准打分，优雅降级不拖垮主循环（`llm_judge.py`，`CLAUDE_USE_JUDGE` 可关）
-- **上下文摘要压缩**：窗口超预算时把最老对话浓缩成摘要而非粗暴丢弃，保留早期上下文（`summarize.py`，`CLAUDE_USE_SUMMARY` 可关）
-- **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，第三方端点不支持 thinking 参数时自动降级重试，兼容 OpenAI / Qwen / Claude 多模型
+- **四层生产护栏**：
+  - 最大轮数兜底：迭代超过上限强制停（防死循环）
+  - 原地打转检测：连续「同工具同参数」自动刹车（`spin_guard.py`）
+  - 上下文超窗裁剪 + 摘要压缩：40k Token 超预算自动处理，永远保住最近对话（`context.py` + `summarize.py`）
+  - LLM 质量裁判：每轮回答后独立 LLM 按 0-5 打分，优雅降级不拖垮主循环（`llm_judge.py`）
+- **流式输出**：边生成边打字机吐字，实时体验（`CLAUDE_USE_STREAMING` 可关）
+- **MCP 协议接入**：工具不写死在代码里，通过 `CLAUDE_MCP_SERVER` 连一个独立小程序要工具（可关）
+- **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
+- **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
+- **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
+- **自动化测试**：176 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
-- **自动化测试**：35+ 测试用例 + 500 条随机序列属性测试（工具循环、护栏、Mock 验证、裁判打分、上下文裁剪、摘要压缩）
 
 ## 快速开始
 
@@ -38,28 +44,56 @@ python agent-claude.py
 | `ANTHROPIC_MODEL` | 模型名称 | `claude-opus-5` |
 | `CLAUDE_MAX_TOKENS` | 最大输出 token | `16000` |
 | `ANTHROPIC_USE_THINKING` | 启用 adaptive thinking | `false` |
+| `CLAUDE_USE_STREAMING` | 流式打字机输出 | `true` |
 | `CLAUDE_USE_JUDGE` | 每轮回答后是否请 LLM 裁判打分 | `true` |
-| `CLAUDE_USE_SUMMARY` | 上下文超预算时是否用摘要压缩而非直接裁剪 | `true` |
+| `CLAUDE_USE_SUMMARY` | 上下文超预算时是否用摘要压缩 | `true` |
+| `CLAUDE_USE_MCP` | 是否接入 MCP 外部工具 | `true` |
+| `CLAUDE_MCP_SERVER` | MCP 服务器启动命令（配了才连，连不上优雅降级） | （空） |
+| `CLAUDE_USE_RAG` | 是否启用 RAG 检索增强 | `true` |
+| `CLAUDE_RAG_FILE` | RAG 知识库文件 | `learn-agent/knowledge.md` |
+| `CLAUDE_RAG_TOP_K` | 检索返回条数 | `2` |
+| `CLAUDE_RAG_CHUNK_SIZE` | 知识库切块大小 | `200` |
+| `CLAUDE_USE_EMBEDDING` | 是否启用向量检索 | `true` |
+| `CLAUDE_EMBEDDING_MODEL` | 真向量模型（如 `BAAI/bge-small-zh-v1.5`，空则用词袋向量） | （空） |
+| `CLAUDE_USE_MEMORY` | 是否启用长记忆记事本 | `true` |
+| `CLAUDE_MEMORY_FILE` | 记忆文件路径 | `agent-claude.py` 旁 `agent_memory.json` |
+| `CLAUDE_MEMORY_MAX_ITEMS` | 记忆最多保留条数 | `50` |
 
 ## 项目结构
 
 ```
 .
-├── agent-claude.py    # 主程序：Agent 循环 + 工具系统 + 护栏
+├── agent-claude.py    # 主程序：Agent 循环 + 工具系统 + 四层护栏 + 流式/MCP/RAG/长记忆
 ├── skills/            # 技能知识库（Markdown）
 │   ├── python.md
 │   ├── git.md
 │   └── shell.md
-├── learn-agent/       # Agent 开发课程练习与测试
-│   ├── agent_loop.py  # 可测试的 Agent 循环核心
-│   ├── spin_guard.py  # 打转检测护栏
-│   ├── context.py     # 上下文裁剪护栏
-│   ├── summarize.py   # 摘要压缩（trim 的进阶，旧对话浓缩成便签）
-│   ├── llm_judge.py   # LLM 质量裁判
-│   └── test_*.py      # 自动化测试
+├── learn-agent/       # Agent 开发课程（22 课）：按课演示 + 可测模块 + 测试
+│   ├── agent_loop.py      # 可测试的 Agent 循环核心（含 FakeModel 假模型）
+│   ├── spin_guard.py      # 打转检测护栏
+│   ├── context.py         # 上下文裁剪护栏
+│   ├── summarize.py       # 摘要压缩（旧对话浓缩成便签）
+│   ├── llm_judge.py       # LLM 质量裁判
+│   ├── memory_store.py    # 长记忆记事本（JSON 持久化，重启不忘）
+│   ├── embedding.py       # 向量嵌入（余弦相似度）
+│   ├── embedding_models.py# 真向量模型（bge 中文语义检索）
+│   ├── multi_agent.py     # 多 Agent 协作（写手 + 评审双脑）
+│   ├── prompting.py       # 提示词工程
+│   ├── 0x-*.py / 1x-*.py  # 按课编号的演示程序
+│   └── test_*.py          # 176 个 unittest
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
 ```
+
+## 学习路径（learn-agent/，22 课）
+
+从零手写 Agent 的完整自研课程，每课 = 一个可运行演示 + 一个可测模块 + 一组测试：
+
+- **基础篇**：最小 Agent → 手写工具调用循环 → 四道护栏（兜底 / 打转 / 上下文 / 裁判）
+- **工程化篇**：上下文裁剪 + 摘要压缩、LLM-as-judge、FakeModel 假模型零成本自动化测试
+- **进阶能力篇**：流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、上线部署原理
+
+全部能力逐课接进 `agent-claude.py`，每个能力都带环境变量开关，可独立启停、可测试。
 
 ## 测试
 
@@ -67,7 +101,10 @@ python agent-claude.py
 cd learn-agent && python -m pytest  # 或逐个运行 test_*.py
 ```
 
+176 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。
+
 ## 说明
 
 - `.env` 含真实密钥，永不提交，仅保留 `.env.example` 模板
+- `agent_memory.json` 含个人记忆，已加入 `.gitignore`，不进仓库
 - 安全：工具执行默认禁止 shell 操作符注入；网页抓取走完整 SSL 校验
