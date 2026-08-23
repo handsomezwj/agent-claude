@@ -68,7 +68,7 @@ python agent-claude.py
 │   ├── python.md
 │   ├── git.md
 │   └── shell.md
-├── learn-agent/       # Agent 开发课程（22 课）：按课演示 + 可测模块 + 测试
+├── learn-agent/       # Agent 开发课程（22 课 + 异步专项）：按课演示 + 可测模块 + 测试
 │   ├── agent_loop.py      # 可测试的 Agent 循环核心（含 FakeModel 假模型）
 │   ├── spin_guard.py      # 打转检测护栏
 │   ├── context.py         # 上下文裁剪护栏
@@ -79,19 +79,20 @@ python agent-claude.py
 │   ├── embedding_models.py# 真向量模型（bge 中文语义检索）
 │   ├── multi_agent.py     # 多 Agent 协作（写手 + 评审双脑）
 │   ├── prompting.py       # 提示词工程
+│   ├── async_utils.py     # 异步编程（串行 / 并发 gather / 限流 Semaphore）
 │   ├── 0x-*.py / 1x-*.py  # 按课编号的演示程序
-│   └── test_*.py          # 176 个 unittest
+│   └── test_*.py          # 188 个 unittest
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
 ```
 
-## 学习路径（learn-agent/，22 课）
+## 学习路径（learn-agent/，22 课 + 异步专项）
 
 从零手写 Agent 的完整自研课程，每课 = 一个可运行演示 + 一个可测模块 + 一组测试：
 
 - **基础篇**：最小 Agent → 手写工具调用循环 → 四道护栏（兜底 / 打转 / 上下文 / 裁判）
 - **工程化篇**：上下文裁剪 + 摘要压缩、LLM-as-judge、FakeModel 假模型零成本自动化测试
-- **进阶能力篇**：流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、上线部署原理
+- **进阶能力篇**：流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、上线部署原理、异步编程（串行 / 并发 / 限流）
 
 全部能力逐课接进 `agent-claude.py`，每个能力都带环境变量开关，可独立启停、可测试。
 
@@ -101,7 +102,7 @@ python agent-claude.py
 cd learn-agent && python -m pytest  # 或逐个运行 test_*.py
 ```
 
-176 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。
+188 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。
 
 ## 说明
 

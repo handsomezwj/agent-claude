@@ -56,6 +56,9 @@
 | `18-memory.py` | 第 21 课 | 记忆演示：五幕演完"重启不失忆"的机关；真模式两段对话间重启，模型真记得 | `python 18-memory.py --fake` |
 | `test_memory.py` | 第 21 课 | eval：测记事本增删去重/上限/存盘读回/坏文件/事实提取/自动记 | `python test_memory.py` |
 | `19-deploy.md` | 第 22 课 | 上线部署笔记：怎么启动 / 密钥放哪 / 状态存哪，照着能上线 | 复习用笔记（无代码） |
+| `async_utils.py` | 专项 · 异步 | 被测对象：异步编程（fake_call 门 / 串行 / 并发 gather / 限流 Semaphore） | — |
+| `20-async.py` | 专项 · 异步 | 异步演示：五幕（串行 vs 并发 / 保序 / 限流 / 依赖关系） | `python 20-async.py` |
+| `test_async.py` | 专项 · 异步 | eval：测串行耗时/并发耗时/保序/限流上限/边界 | `python test_async.py` |
 
 ## 怎么跑
 
@@ -70,6 +73,7 @@
 - 第 20 课提示词工程：`--fake` 假模型剧本离线看六幕（零成本）；不带参数第 2、5 幕会真调 API（花一点钱，看真差距）。纯知识课 + 小实验，不接 `agent-claude.py`。
 - 第 21 课长记忆：`--fake` 离线演五幕（记事本增删存盘 / 重启读回 / 自动记 / 贴进 system prompt / 重启不失忆的机关，零成本）；不带参数第 5 幕真调 API，两段对话之间"重启"，模型真的记得你。`agent-claude.py` 默认开长记忆：把"关于用户的事实"记进 `agent_memory.json`（在 agent-claude.py 旁边，不是课程目录），每轮对话结束自动记、每次回答前贴进 system prompt；可用 `CLAUDE_USE_MEMORY=false` 关掉、`CLAUDE_MEMORY_FILE` 换文件、`CLAUDE_MEMORY_MAX_ITEMS` 调条数上限。
 - 第 22 课是纯笔记（`19-deploy.md`），不花钱。想真部署：照着"第 4 节流程"做即可（加 gunicorn 到 requirements → 建 Procfile → 推 GitHub → Render 连仓库填环境变量 → 拿 URL）。动手任务里有个零成本体验：本地用 `waitress` 跑生产模式（gunicorn 在 Windows 上跑不了——这本身就是"本地≠线上"的例子）。
+- 异步专项完全离线：用 `asyncio.sleep` 模拟 API 延迟，不读 `.env`、不花一分钱。`20-async.py` 五幕演示（串行 vs 并发 / 保序 / 限流 / 依赖关系），`test_async.py` 12 个测试验证"串行耗时为和 / 并发耗时为最大 / 限流上限不超"。
 - 测试文件不需要 `.env`，跑之前记得改坏一个期望值试试红灯。
 
 ## 三句心法（回头看用）
@@ -101,3 +105,4 @@
 - ✅ 第二十课完成：提示词工程深挖（`prompting.py` + `test_prompting.py` + `17-prompting.py`，26 测试）——system prompt 三要素（角色+规则+输出格式）、few-shot 少样本（给例子比说"要简短"管用）、结构化输出 JSON 容错抽取（剥代码块/剥废话，抠不到返回 None）、max_tokens 的坑（截断 + resume-advisor 踩过的空响应）、思维链 CoT（先推理再答 + 抠最终答案）、提示词注入防护（扫"忽略指令"这类苗头）、分隔符指令-数据分离、温度速查表（抽取 0 / 创意 1）。纯知识课 + 小实验，未接 `agent-claude.py`；复用第 10 课 `estimate_tokens` 当"门"。中途修了 `.env` 路径 bug（10/16/17 课的 demo 改指向 `..`）。
 - ✅ 第二十一课完成：长记忆（`memory_store.py` + `test_memory.py` + `18-memory.py`，27 测试）——给 agent 一个"记事本"：`MemoryStore` 把"关于用户的事实"存进 JSON 文件（增/查/存盘/读回，重复不记、max_items 挤最老、读坏文件优雅降级）；`extract_facts` 规则门从对话抽事实（我叫/我住在/我喜欢/我在…工作，外加"记住：X / 别忘了 X"显式命令，区分"记住了"这种应答）；`build_memory_prompt` 把记忆贴进 system prompt，模型"一开场就知道你是谁"；`remember_last_turn` 一轮结束自动记（复用第九课"抽最近一问 + 最近一答"的逻辑）。已接进 `agent-claude.py`：启动 `connect_memory()` 打开记事本（默认 `agent_memory.json` 在 agent-claude.py 旁边，不进课程目录免得用户隐私误提交），每次回答前 `build_system_text()` 把记忆贴进 system，每轮 END_TURN 后自动记新事实；`CLAUDE_USE_MEMORY=false` 可关、`CLAUDE_MEMORY_FILE` 换文件。`test_real_agent.py` 验证不破坏原护栏。
 - ✅ 第二十二课完成：上线部署原理（`19-deploy.md`）——文档课，不花钱。对着真实 resume-advisor 把"怎么启动（gunicorn `app:app` + `0.0.0.0:$PORT`，Windows 本地用 waitress）/ 密钥放哪（.gitignore 盖 .env + 平台环境变量面板，load_dotenv 不覆盖已有变量）/ 状态存哪（内存 dict 重启就丢，生产换数据库）"讲透；含 Render 上线流程、上线后真坑（冷启动/max_tokens 空响应/超时/健康检查）、面试速答、零成本动手任务（本地 waitress 跑生产模式）。想真部署（花钱版）随时说。
+- ✅ 异步编程专项完成（`async_utils.py` + `test_async.py` + `20-async.py`，12 测试）——讲透"程序等 I/O 时 CPU 在干等"：串行 await 总耗时相加、`gather` 并发叠等待、`Semaphore` 限流防打爆、保序（返回顺序=传入顺序）、依赖关系（没依赖的并发，有依赖的必须等）。完全离线免费。独立演示 + 测试，未接 `agent-claude.py`（agent 用的同步 SDK 流式；接异步是自然延伸，想接再说）。
