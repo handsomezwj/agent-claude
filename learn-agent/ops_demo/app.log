@@ -1,0 +1,19 @@
+2026-08-24 10:00:01 INFO [startup] order-api starting, port=8080
+2026-08-24 10:00:02 INFO [startup] db pool ready (max_conns=10)
+2026-08-24 10:00:03 INFO [http] GET /api/orders 200 12ms
+2026-08-24 10:01:12 INFO [http] GET /api/orders 200 15ms
+2026-08-24 10:02:05 INFO [http] GET /api/orders 200 18ms
+2026-08-24 10:03:31 INFO [http] GET /api/order/10086 200 21ms
+2026-08-24 10:04:41 WARN [pool] pool 9/10 busy, checkout took 980ms
+2026-08-24 10:04:55 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:01 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:03 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:08 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:11 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:15 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:19 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:24 ERROR [pool] database connection pool exhausted (max_conns=10), waiting for a free connection
+2026-08-24 10:05:30 CRITICAL [startup] 8 consecutive pool checkout failures, terminating
+2026-08-24 10:05:31 INFO [startup] order-api stopped
+2026-08-26 04:26:22 INFO [startup] order-api started (pid=28536, port=8080)
+2026-08-26 04:26:22 INFO [startup] order-api stopped

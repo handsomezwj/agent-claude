@@ -1,0 +1,8 @@
+{
+  "order-api": {
+    "description": "订单查询服务，读 MySQL 订单库",
+    "pid_file": "order-api.pid",
+    "log_file": "app.log",
+    "port": 8080
+  }
+}

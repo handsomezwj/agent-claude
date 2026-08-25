@@ -49,6 +49,7 @@ from rag import chunk_text, retrieve_top_k as keyword_retrieve
 from embedding import BowEmbedder, build_vocab, retrieve_top_k as embed_retrieve
 from embedding_models import try_load_model, REAL_MIN_SIM
 from memory_store import MemoryStore, build_memory_prompt, remember_last_turn
+from itops_guard import guard_command, load_service_registry, check_service_status, read_log_safely
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -114,6 +115,14 @@ MEMORY_FILE = os.environ.get("CLAUDE_MEMORY_FILE", "").strip() or str(
 )
 MEMORY_MAX_ITEMS = int(os.environ.get("CLAUDE_MEMORY_MAX_ITEMS", "50"))
 
+# --- IT 运维助手（第二十二课）：只读诊断 + 破坏性命令安全护栏（可关：CLAUDE_USE_IT_OPS=false）
+# 真实业务场景：查服务状态、查日志找故障现场，但删除/重启/杀进程一律拒绝。
+# 数据目录默认 learn-agent/ops_demo（假服务 + 假日志），可用 CLAUDE_OPS_DATA_DIR 指定。
+USE_IT_OPS = os.environ.get("CLAUDE_USE_IT_OPS", "true").lower() == "true"
+OPS_DATA_DIR = os.environ.get("CLAUDE_OPS_DATA_DIR", "").strip() or str(
+    Path(__file__).parent / "learn-agent" / "ops_demo"
+)
+
 MEMORY: MemoryStore | None = None   # 记事本实例；None = 记忆没开
 
 
@@ -176,6 +185,7 @@ SYSTEM_PROMPT = f"""
 1. 所有回答必须使用中文，包括思考过程和技术术语
 2. 遇到不熟悉的专题时，请先调用 load_skill 工具加载对应的知识，再给出回答
 3. 保持回答简洁、准确、有帮助
+4. 遇到服务/日志/运维类问题，优先用 check_service / query_log 做只读排查；删除、重启、杀进程类操作一律拒绝，需人工确认
 
 当前可用技能：
 {SKILL_LOADER.get_descriptions()}"""
@@ -236,6 +246,47 @@ TOOLS: list[ToolParam] = [
         },
     },
 ]
+
+# 第二十二课：IT 运维业务工具（只读诊断 + 安全护栏；可关：CLAUDE_USE_IT_OPS=false）
+if USE_IT_OPS:
+    TOOLS += [
+        {
+            "name": "check_service",
+            "description": "检查一个服务的运行状态（只读）：运行中/停止/未知服务，含 pid 和端口",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_name": {
+                        "type": "string",
+                        "description": "要检查的服务名，如 order-api",
+                    }
+                },
+                "required": ["service_name"],
+            },
+        },
+        {
+            "name": "query_log",
+            "description": "查询服务的日志（只读），可按关键词过滤，返回带行号的最近若干行",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_name": {
+                        "type": "string",
+                        "description": "要查日志的服务名，如 order-api",
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "过滤关键词（忽略大小写），如 ERROR、CRITICAL；留空则返回最近日志",
+                    },
+                    "tail_lines": {
+                        "type": "integer",
+                        "description": "最多返回几行，默认 20，上限 100",
+                    },
+                },
+                "required": ["service_name"],
+            },
+        },
+    ]
 
 # 第十五课：MCP 连上后，把外部工具加进这份"实际发给模型的清单"。
 # 默认就是内置工具；connect_mcp() 连上服务器后替换成 内置 + 外部。
@@ -315,6 +366,13 @@ def run_command(command: str) -> str:
     """Execute a shell command.  Uses shell=False with shlex splitting for safety.
     Falls back to shell=True only for commands with shell operators (|, >, <, &&, etc.).
     """
+    # 第二十二课：只读安全护栏——破坏性命令（删/杀/重启/写文件）一律拒绝，不执行
+    allowed, reason = guard_command(command)
+    if not allowed:
+        return (
+            f"[安全护栏] 拒绝执行破坏性命令：{reason}。"
+            f"运维助手只做只读诊断，删除/重启/杀进程类操作需人工确认后手动执行。"
+        )
     shell_operators = {"|", ">", "<", "&", ";", "$(", "`"}
     needs_shell = any(op in command for op in shell_operators)
 
@@ -332,6 +390,29 @@ def run_command(command: str) -> str:
             result = subprocess.run(command, shell=True, capture_output=True, text=True)
 
     return result.stdout or result.stderr
+
+
+def check_service(service_name: str) -> str:
+    """检查一个服务的运行状态（只读）。照 run_command 模式：异常吞成字符串。"""
+    try:
+        base = Path(OPS_DATA_DIR)
+        registry = load_service_registry(base)
+        return check_service_status(service_name, registry, base)
+    except Exception as exc:
+        return f"检查服务失败: {exc}"
+
+
+def query_log(service_name: str, keyword: str = "", tail_lines: int = 20) -> str:
+    """查询服务日志（只读），可按关键词过滤。照 run_command 模式：异常吞成字符串。"""
+    try:
+        base = Path(OPS_DATA_DIR)
+        registry = load_service_registry(base)
+        if service_name not in registry:
+            return f"未知服务：{service_name}"
+        log_rel = registry[service_name].get("log_file", "app.log")
+        return read_log_safely(log_rel, base, keyword=keyword, tail_lines=tail_lines)
+    except Exception as exc:
+        return f"查询日志失败: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +447,25 @@ def execute_tool(name: str, args: dict) -> str:
         print(f"[加载技能]: {skill_name}")
         output = SKILL_LOADER.get_content(skill_name)
         print(f"[技能内容]: {output[:200]}...")
+        return output
+
+    elif name == "check_service":
+        service_name = str(args.get("service_name", ""))
+        print(f"[查服务]: {service_name}")
+        output = check_service(service_name)
+        print(f"[服务状态]: {output}")
+        return output
+
+    elif name == "query_log":
+        service_name = str(args.get("service_name", ""))
+        keyword = str(args.get("keyword", ""))
+        try:
+            tail_lines = int(args.get("tail_lines", 20))
+        except (TypeError, ValueError):
+            tail_lines = 20
+        print(f"[查日志]: {service_name} keyword={keyword!r}")
+        output = query_log(service_name, keyword, tail_lines)
+        print(f"[日志内容]: {output[:200]}...")
         return output
 
     else:
