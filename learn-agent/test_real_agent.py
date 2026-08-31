@@ -1,13 +1,13 @@
 # 测"你自己的 agent"的护栏：把真 client 换成假模型，一分钱不花
 # 跑：python learn-agent/test_real_agent.py
 #
-# 它证明：agent-claude.py 新抽出的 handle_user_turn，跟课程里测的
-# agent_loop.handle_turn 一样能被剧本驱动、护栏真的会拦。
+# 它证明：agent-claude.py 新抽出的 handle_user_turn，跟 agent_loop 里测的
+# handle_turn 一样能被剧本驱动、护栏真的会拦。
 import os
 import sys
 import importlib.util
 
-# 1) 借课程里的假模型
+# 1) 借用 agent_loop 里的假模型
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agent_loop import FakeModel, FakeResponse, tool_block, text_block
 
