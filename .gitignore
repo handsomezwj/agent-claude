@@ -1,17 +1,14 @@
 # 密钥与环境配置
 .env
 
-# 私人数据：长记忆 + 简历（绝不进公开仓库）
-agent_memory.json
-kimi-改简历-现状简历.txt
-*.pdf
-
-# 临时输出（跑测试/演示留下的杂文件，不进仓库）
-_out.txt
-
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+
+# 个人记忆与运行时残留
+agent_memory.json
+*.pid
+_out.txt
