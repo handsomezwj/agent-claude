@@ -1,18 +1,22 @@
 # 多工具 LLM Agent
 
-基于 Anthropic SDK 从零手写的交互式 AI Agent —— 不依赖 LangChain 等上层框架。手写工具调用循环、四层生产护栏、流式输出、MCP 协议、RAG 检索增强、长记忆持久化，一套代码兼容 Anthropic 官方 / DeepSeek 等兼容端点。
+基于 Anthropic SDK 从零手写的交互式 AI Agent —— 不依赖 LangChain 等上层框架。手写工具调用循环、四层生产护栏、流式输出、MCP 协议、RAG 检索增强、长记忆持久化、多 Agent 协作，一套代码兼容 Anthropic 官方 / DeepSeek 等兼容端点。
 
 ## 功能特性
 
 - **手写工具调用循环**：基于 Anthropic SDK 实现 `while(stop_reason=="tool_use")` 多轮自主工具编排，不依赖上层框架，核心逻辑全透明可控
-- **5 个自定义工具**：
+- **8 个自定义工具**：
   - `run_command` — Shell 执行。默认 `shell=False` + `shlex` 参数拆解防注入，仅管道/重定向命令回退 `shell=True`；`rm`/`kill`/`reboot`/写重定向等破坏性命令由安全护栏 token 级拦截（管道/分号拼接也绕不过）
   - `web_fetch` — 网页抓取。HTML 智能文本抽取（自动跳过 script/nav/footer 噪声），严格 SSL 校验、超时与长度截断
   - `load_skill` — 技能知识库按需加载，注入 System Prompt 扩展 Agent 领域能力
   - `check_service` — 服务状态只读检查（pid 文件三态：未知/停止/运行中）
   - `query_log` — 服务日志只读检索（关键词过滤 + 带行号证据，路径护栏防 `../` 越权逃逸）
+  - `troubleshoot` — 多 Agent 流水线排障（诊断→根因→方案三环接力，安全护栏兜底）
+  - `ops_report` — 多 Agent 主管-工人（拆活分工 + 主管汇总完整报告）
+  - `interview_prep` — 多 Agent 评审团（同一道题多角度专家回答 + 主席汇总满分答案）
 - **SkillLoader 技能系统**：`skills/` 目录下 Markdown 知识库自动加载，按需注入
 - **IT 运维工具集（业务场景）**：只读诊断 + 安全护栏。`check_service`/`query_log` 做服务排查与日志取证，破坏性操作（删文件/杀进程/重启）由护栏**明确拒绝、需人工确认**，可在企业场景安全落地（`CLAUDE_USE_IT_OPS` 可关）
+- **多 Agent 协作**：三种协作模式封装成工具，模型对象是可注入的「门」——测试用假模型零成本、生产换真模型；任一环节失败优雅降级返回说明，不拖垮主循环（`CLAUDE_USE_MULTIAGENT` 可关）
 - **四层生产护栏**：
   - 最大轮数兜底：迭代超过上限强制停（防死循环）
   - 原地打转检测：连续「同工具同参数」自动刹车
@@ -23,7 +27,7 @@
 - **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
-- **自动化测试**：219 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **自动化测试**：267 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
 ## 快速开始
@@ -63,16 +67,18 @@ python agent-claude.py
 | `CLAUDE_MEMORY_MAX_ITEMS` | 记忆最多保留条数 | `50` |
 | `CLAUDE_USE_IT_OPS` | 是否启用 IT 运维助手（服务检查/日志查询/安全护栏） | `true` |
 | `CLAUDE_OPS_DATA_DIR` | 运维演示数据目录（services.json / app.log） | `learn-agent/ops_demo` |
+| `CLAUDE_USE_MULTIAGENT` | 是否启用多 Agent 协作工具（流水线/主管-工人/评审团） | `true` |
 
 ## 项目结构
 
 ```
 .
-├── agent-claude.py    # 主程序：Agent 循环 + 工具系统 + 四层护栏 + 流式/MCP/RAG/长记忆
+├── agent-claude.py    # 主程序：Agent 循环 + 工具系统 + 四层护栏 + 流式/MCP/RAG/长记忆 + 多 Agent
 ├── skills/            # 技能知识库（Markdown）
 │   ├── python.md
 │   ├── git.md
-│   └── shell.md
+│   ├── shell.md
+│   └── ops.md         # IT 排障手册技能
 ├── learn-agent/       # 从零手写 Agent 的完整源码：每个能力 = 可测模块 + 可运行示例 + 测试
 │   ├── agent_loop.py      # Agent 循环核心（含 FakeModel 假模型，零成本测试）
 │   ├── spin_guard.py      # 打转检测护栏
@@ -82,14 +88,21 @@ python agent-claude.py
 │   ├── memory_store.py    # 长记忆记事本（JSON 持久化，重启不忘）
 │   ├── embedding.py       # 词袋向量嵌入（余弦相似度）
 │   ├── embedding_models.py# 真向量模型（bge 中文语义检索）
-│   ├── multi_agent.py     # 多 Agent 协作（写手 + 评审双脑）
+│   ├── multi_agent.py     # 多 Agent 协作基础对象（写手 + 评审双脑）
+│   ├── multiagent_tools.py    # 多 Agent 三种协作模式工具封装（流水线/主管-工人/评审团）
+│   ├── ops_pipeline.py        # 流水线排障（诊断→根因→方案三环接力 + 护栏兜底）
+│   ├── ops_orchestrator.py    # 主管-工人编排（拆活 + 汇总）
+│   ├── ops_debate.py          # 评审团编排（多角度专家 + 主席汇总）
+│   ├── 22-multiagent.py       # 多 Agent 流水线示例（离线剧本可跑）
+│   ├── 23-orchestrator.py     # 主管-工人示例
+│   ├── 24-debate.py           # 评审团示例（面试题满分答案）
 │   ├── prompting.py       # 提示词工程
 │   ├── async_utils.py     # 异步编程（并发 gather / 限流 Semaphore）
 │   ├── itops_guard.py     # IT 运维安全护栏（命令黑名单 / 路径护栏 / 服务三态，纯函数可测）
 │   ├── 21-itops.py        # IT 运维专项示例（离线剧本演示护栏）
 │   ├── ops_demo/          # 运维演示数据（services.json 服务注册表 + app.log 故障现场 + demo_service.py）
 │   ├── *.py               # 每个能力的可运行示例
-│   ├── test_*.py          # 219 个 unittest（FakeModel，零成本）
+│   ├── test_*.py          # 267 个 unittest（FakeModel，零成本）
 │   └── knowledge.md       # RAG 默认知识库
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
@@ -101,17 +114,18 @@ python agent-claude.py
 
 - 手写工具调用循环（`stop_reason` 驱动多轮自主编排）
 - 四层护栏：最大轮数兜底 / 打转检测 / 上下文裁剪 + 摘要压缩 / LLM 质量裁判
-- 流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、多 Agent 协作（写手 + 评审）、提示词工程、长记忆持久化、异步编程、IT 运维排障（只读诊断 + 安全护栏）
+- 流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、长记忆持久化、异步编程、IT 运维排障（只读诊断 + 安全护栏）
+- 多 Agent 协作：流水线排障（诊断→根因→方案接力）、主管-工人（拆活 + 汇总）、评审团（多角度专家 + 主席汇总）三种模式，统一封装成工具接进成品
 
 **每个模块 = 「怎么用」（示例）+「怎么保证不出错」（测试）**。全部能力接进成品后，用 `test_real_agent.py` 回归验证主程序护栏不被破坏。
 
 ## 测试
 
 ```bash
-cd learn-agent && python -m pytest  # 或逐个运行 test_*.py
+cd learn-agent && python -m unittest discover -p "test_*.py"
 ```
 
-219 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。新增运维专项 31 个测试覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期。
+267 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期，以及多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级。
 
 ## 说明
 
