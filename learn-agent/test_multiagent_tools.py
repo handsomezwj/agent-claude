@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agent_loop import FakeModel, FakeResponse, text_block
 from reliability import CircuitBreaker
 from observability import Tracer
+from model_tiers import RecordingModel
 import multiagent_tools as mt
 
 
@@ -193,6 +194,63 @@ class TestObservabilityIntegration(unittest.TestCase):
         out = mt.troubleshoot("服务好像挂了", script("现场报告X", "根因Y", "方案Z"))
         self.assertIn("现场报告X", out)
         self.assertIn("方案Z", out)
+
+
+class TestTierIntegration(unittest.TestCase):
+    """企业级加固接进工具（multiagent_tools + model_tiers.py）：
+    传 tier_models=… 就按角色档位发不同模型名（RecordingModel 记下发出去的名字）；
+    不传 = 三个/四个角色都发同一个 model_name（行为不变，默认）。
+    """
+
+    TIER_MODELS = {"cheap": "claude-haiku-4-5", "mid": "claude-sonnet-4-5",
+                   "top": "claude-opus-5"}
+
+    def test_pipeline_routes_by_role(self):
+        # 流水线：诊断/根因发旗舰、方案官发经济档；顺序 = 调用顺序
+        rec = RecordingModel(script("现场报告X", "根因Y", "方案Z"))
+        mt.troubleshoot("服务好像挂了", rec, model_name="claude-opus-5",
+                        tier_models=self.TIER_MODELS)
+        self.assertEqual(rec.model_names,
+                         ["claude-opus-5", "claude-opus-5", "claude-haiku-4-5"])
+
+    def test_no_tier_models_all_same_default(self):
+        # 对照：不传 tier_models → 三个角色同一个模型名（分级关掉 = 老行为）
+        rec = RecordingModel(script("现场报告X", "根因Y", "方案Z"))
+        mt.troubleshoot("服务好像挂了", rec, model_name="claude-opus-5")
+        self.assertEqual(rec.model_names,
+                         ["claude-opus-5", "claude-opus-5", "claude-opus-5"])
+
+    def test_ops_report_routes_boss_mid_status_cheap(self):
+        # 主管-工人：拆活是确定性逻辑（build_tasks 不靠模型），工人先查、
+        # 主管收尾汇总 → status/log 发经济档、risk/boss 发标准档
+        rec = RecordingModel(script("状态S", "日志L", "风险R", "主管总报告"))
+        mt.ops_report("出一份排查报告", rec, model_name="claude-opus-5",
+                      tier_models=self.TIER_MODELS)
+        self.assertEqual(rec.model_names,
+                         ["claude-haiku-4-5", "claude-haiku-4-5",   # status, log
+                          "claude-sonnet-4-5", "claude-sonnet-4-5"])  # risk, boss
+
+    def test_interview_experts_stay_top(self):
+        # 评审团：专家先答、主席收尾装裱 → 三个专家全旗舰、只有主席用标准档
+        rec = RecordingModel(script("原理A", "工程B", "面试C", "满分答案D"))
+        mt.interview_prep("讲一下 RAG", rec, model_name="claude-opus-5",
+                          tier_models=self.TIER_MODELS)
+        self.assertEqual(rec.model_names,
+                         ["claude-opus-5", "claude-opus-5", "claude-opus-5",
+                          "claude-sonnet-4-5"])
+
+    def test_tiering_survives_reliability_layer(self):
+        # 三件套一起上：重试扛抖动，分级照常生效（分层不打架）
+        flaky = FlakyModel(RecordingModel(script("现场报告X", "根因Y", "方案Z")),
+                           fail_first=2)
+        tr = Tracer()
+        breaker = CircuitBreaker(fail_threshold=3, recovery_time=1e9)
+        out = mt.troubleshoot("服务好像挂了", flaky, retries=2, breaker=breaker,
+                              tracer=tr, tier_models=self.TIER_MODELS)
+        self.assertIn("方案Z", out)
+        self.assertEqual(tr.roots[0].status, "ok")
+        self.assertEqual(flaky._inner.model_names,   # 重试救回后各环仍发各档名
+                         ["claude-opus-5", "claude-opus-5", "claude-haiku-4-5"])
 
 
 if __name__ == "__main__":

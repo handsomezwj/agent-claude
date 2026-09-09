@@ -53,6 +53,7 @@ from itops_guard import guard_command, load_service_registry, check_service_stat
 from multiagent_tools import troubleshoot, ops_report, interview_prep
 from reliability import CircuitBreaker
 from observability import Tracer
+from model_tiers import tier_models_from_env
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -162,6 +163,20 @@ _RELIABILITY_KW = (
 USE_TRACE = os.environ.get("CLAUDE_USE_TRACE", "true").lower() == "true"
 # 可选：病历存档到文件（一行 = 一次运行的完整病历 JSON），重启后还能回放
 _TRACE_FILE = os.environ.get("CLAUDE_TRACE_FILE", "").strip()
+
+# --- 企业级加固 · 分级模型 / 省钱路由（可关：CLAUDE_USE_TIERS=false）
+# 多 Agent 一次要调 3~4 次模型，不是每次调用都值得顶配：诊断/根因/专家要强推理，
+# 用旗舰档；方案官/查状态的工人是半机械整理活、且输出有安全护栏兜底，降经济档
+# 也不掉质量。配了便宜档模型名，各角色就按策略表发各自档位的模型——账单瘦身，
+# 质量不掉（护栏 = 省钱的底气）。三档 env：
+#   CLAUDE_MODEL_CHEAP  经济档模型（默认 = 旗舰：不配就不分级）
+#   CLAUDE_MODEL_MID    标准档模型（同上）
+#   CLAUDE_MODEL_TOP    旗舰档模型（同上）
+# 全不配 = 三档都退回 MODEL（每个角色仍发同一个模型，行为与不分级完全一致）。
+USE_TIERS = os.environ.get("CLAUDE_USE_TIERS", "true").lower() == "true"
+_TIER_MODELS = (tier_models_from_env(MODEL) if USE_TIERS else None)
+# 传给多 Agent 工具的关键字；USE_TIERS 关掉就传空 = 工具原样（每个角色同一模型）。
+_TIERS_KW = ({"tier_models": _TIER_MODELS} if USE_TIERS else {})
 
 MEMORY: MemoryStore | None = None   # 记事本实例；None = 记忆没开
 
@@ -534,12 +549,13 @@ def call_multiagent(tool_call):
         call_multiagent(lambda **kw: troubleshoot(problem, client, MODEL,
                           service_name=service_name, data_dir=OPS_DATA_DIR, **kw))
 
-    可靠性 kw（重试/熔断，_RELIABILITY_KW）和 trace 配置由这里统一注入：
-    每次调用开一本新"病历本"，跑完把病历打到终端给你看（可选存档到 _TRACE_FILE）。
-    trace 只读不改：返回文本 = 模型该看的干净答案，病历 = 另起一行给人看的。
+    可靠性 kw（重试/熔断，_RELIABILITY_KW）、trace 配置和分级模型（_TIERS_KW）
+    都由这里统一注入：每次调用开一本新"病历本"，跑完把病历打到终端给你看
+    （可选存档到 _TRACE_FILE）。trace 只读不改：返回文本 = 模型该看的干净答案，
+    病历 = 另起一行给人看的。分级 = 构造时定死每个角色发的模型名，协调器无感。
     """
     tracer = Tracer() if USE_TRACE else None
-    kw = dict(_RELIABILITY_KW)
+    kw = dict(_RELIABILITY_KW, **_TIERS_KW)
     if tracer is not None:
         kw["tracer"] = tracer
     output = tool_call(**kw)

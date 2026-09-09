@@ -16,12 +16,15 @@
 #   retries/timeout/breaker → reliability.py（可靠性层·第一步）：重试扛抖动、超时兜慢、熔断防雪崩
 #   tracer               → observability.py（可观测性层·第二步）：每次 ask 记一段病历，
 #                           谁、跑多久、成败如何。trace 是只读的账本，不掺和业务结果。
+#   tier_models          → model_tiers.py（分级模型·第三步）：按角色→档位策略给每环发不同
+#                           档位的模型（难环节用贵档、机械环降经济档），钱花在刀刃上
 import contextlib
 import os
 
 from multi_agent import Agent
 from reliability import HardenedAgent
 from observability import TracedAgent
+from model_tiers import resolve_role_models
 from ops_pipeline import (
     DIAG_SYSTEM, ROOTCAUSE_SYSTEM, REMEDY_SYSTEM,
     run_pipeline,
@@ -78,43 +81,71 @@ def _trace_top(tracer, label):
     return contextlib.nullcontext()
 
 
-def make_pipeline_agents(model, model_name="fake"):
-    """流水线三环：诊断官 → 根因官 → 方案官。返回 dict，传给 run_pipeline。"""
+def _pick_model_name(key, model_name, role_models):
+    """查这个角色分到的 model 名；没分到（role_models 没配）就用统一的 model_name。
+
+    分级模型（企业级加固 · 省钱路由）就在这一步落地：给每个角色发不同的模型名，
+    Agent 在构造时把 model_name 定死，同一个 client 每次请求却能指定不同 model——
+    协调器只认 ask() 两个门，谁用了哪档模型它一概不知（门哲学第三次兑现）。
+    """
+    if role_models is None:
+        return model_name
+    return role_models.get(key, model_name)
+
+
+def make_pipeline_agents(model, model_name="fake", role_models=None):
+    """流水线三环：诊断官 → 根因官 → 方案官。返回 dict，传给 run_pipeline。
+
+    role_models  {diag/root/remedy: 模型名} —— 分级模型用的：每个角色分到
+    不同档位的模型。None = 三个角色都用同一个 model_name（不分级，默认）。
+    """
     return {
-        "diag": Agent("诊断官", DIAG_SYSTEM, model, model_name),
-        "root": Agent("根因官", ROOTCAUSE_SYSTEM, model, model_name),
-        "remedy": Agent("方案官", REMEDY_SYSTEM, model, model_name),
+        "diag": Agent("诊断官", DIAG_SYSTEM, model,
+                      _pick_model_name("diag", model_name, role_models)),
+        "root": Agent("根因官", ROOTCAUSE_SYSTEM, model,
+                      _pick_model_name("root", model_name, role_models)),
+        "remedy": Agent("方案官", REMEDY_SYSTEM, model,
+                        _pick_model_name("remedy", model_name, role_models)),
     }
 
 
-def make_orchestrator_agents(model, model_name="fake"):
+def make_orchestrator_agents(model, model_name="fake", role_models=None):
     """主管 + 三个工人（状态 / 日志 / 风险）。返回 (boss, workers dict)。"""
-    boss = Agent("主管", ORCHESTRATOR_SYSTEM, model, model_name)
-    workers = {name: Agent(WORKER_LABELS[name], system, model, model_name)
+    boss = Agent("主管", ORCHESTRATOR_SYSTEM, model,
+                 _pick_model_name("boss", model_name, role_models))
+    workers = {name: Agent(WORKER_LABELS[name], system, model,
+                           _pick_model_name(name, model_name, role_models))
                for name, system in WORKER_SYSTEMS.items()}
     return boss, workers
 
 
-def make_debate_agents(model, model_name="fake"):
+def make_debate_agents(model, model_name="fake", role_models=None):
     """主席 + 三个专家（原理 / 工程 / 面试）。返回 (chair, experts dict)。"""
-    chair = Agent("主席", CHAIR_SYSTEM, model, model_name)
-    experts = {name: Agent(EXPERT_LABELS[name], system, model, model_name)
+    chair = Agent("主席", CHAIR_SYSTEM, model,
+                  _pick_model_name("chair", model_name, role_models))
+    experts = {name: Agent(EXPERT_LABELS[name], system, model,
+                           _pick_model_name(name, model_name, role_models))
                for name, system in EXPERT_SYSTEMS.items()}
     return chair, experts
 
 
 def troubleshoot(problem, model, model_name="fake",
                  service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR,
-                 retries=0, timeout=None, breaker=None, tracer=None):
+                 retries=0, timeout=None, breaker=None, tracer=None,
+                 tier_models=None):
     """流水线排障：诊断 → 根因 → 方案。返回一段长文本（喂回主循环）。
 
     retries / timeout / breaker = 企业级加固（可靠性层）：给三环每个 Agent 包上
     重试 / 超时 / 熔断。tracer = 可观测性层：每次 ask 记一段病历（谁/多久/成败）。
-    全没配 = 原样跑（默认）；agent-claude.py 配了开关就自动带上。
+    tier_models = 分级模型（省钱路由）：{档位: 模型名}，按策略表给每环发不同档位
+    的模型（诊断/根因用贵档、方案官降经济档）。全没配 = 原样跑（默认）；
+    agent-claude.py 配了开关就自动带上。
     """
     try:
+        role_models = resolve_role_models("pipeline", model_name, tier_models)
         agents = {k: _harden_one(a, retries, timeout, breaker)
-                  for k, a in make_pipeline_agents(model, model_name).items()}
+                  for k, a in make_pipeline_agents(model, model_name,
+                                                   role_models).items()}
         with _trace_top(tracer, f"流水线排障：{problem[:20]}") as sp:
             traced = {k: _trace_one(a, tracer) for k, a in agents.items()}
             r = run_pipeline(traced, problem, data_dir, service_name)
@@ -138,14 +169,16 @@ def troubleshoot(problem, model, model_name="fake",
 
 def ops_report(problem, model, model_name="fake",
                service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR,
-               retries=0, timeout=None, breaker=None, tracer=None):
+               retries=0, timeout=None, breaker=None, tracer=None,
+               tier_models=None):
     """主管-工人：拆活分工，主管汇总成一份报告。返回文本。
 
-    retries / timeout / breaker / tracer = 企业级加固（可靠性层 + 可观测性层），
-    同 troubleshoot。
+    retries / timeout / breaker / tracer / tier_models = 企业级加固
+    （可靠性层 + 可观测性层 + 分级模型），同 troubleshoot。
     """
     try:
-        boss, workers = make_orchestrator_agents(model, model_name)
+        role_models = resolve_role_models("orchestrator", model_name, tier_models)
+        boss, workers = make_orchestrator_agents(model, model_name, role_models)
         boss = _harden_one(boss, retries, timeout, breaker)
         workers = {k: _harden_one(a, retries, timeout, breaker)
                    for k, a in workers.items()}
@@ -164,14 +197,16 @@ def ops_report(problem, model, model_name="fake",
 
 
 def interview_prep(question, model, model_name="fake",
-                   retries=0, timeout=None, breaker=None, tracer=None):
+                   retries=0, timeout=None, breaker=None, tracer=None,
+                   tier_models=None):
     """评审团：同一道题三个专家各答，主席汇总满分答案。返回文本。
 
-    retries / timeout / breaker / tracer = 企业级加固（可靠性层 + 可观测性层），
-    同 troubleshoot。
+    retries / timeout / breaker / tracer / tier_models = 企业级加固
+    （可靠性层 + 可观测性层 + 分级模型），同 troubleshoot。
     """
     try:
-        chair, experts = make_debate_agents(model, model_name)
+        role_models = resolve_role_models("debate", model_name, tier_models)
+        chair, experts = make_debate_agents(model, model_name, role_models)
         chair = _harden_one(chair, retries, timeout, breaker)
         experts = {k: _harden_one(a, retries, timeout, breaker)
                    for k, a in experts.items()}
