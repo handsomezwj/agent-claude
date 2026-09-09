@@ -11,9 +11,17 @@
 #
 # 每个工具都是「优雅降级」的：内部某个 Agent 挂了 → 返回带前缀的说明文本，绝不抛异常，
 # 主循环拿到的是普通字符串，照常接话。
+#
+# 企业级加固（可选，agent-claude.py 用环境变量开关决定带不带）：
+#   retries/timeout/breaker → reliability.py（可靠性层·第一步）：重试扛抖动、超时兜慢、熔断防雪崩
+#   tracer               → observability.py（可观测性层·第二步）：每次 ask 记一段病历，
+#                           谁、跑多久、成败如何。trace 是只读的账本，不掺和业务结果。
+import contextlib
 import os
 
 from multi_agent import Agent
+from reliability import HardenedAgent
+from observability import TracedAgent
 from ops_pipeline import (
     DIAG_SYSTEM, ROOTCAUSE_SYSTEM, REMEDY_SYSTEM,
     run_pipeline,
@@ -34,6 +42,40 @@ DEFAULT_SERVICE = "order-api"
 TAG_PIPELINE = "[多Agent·流水线]"
 TAG_ORCHESTRATOR = "[多Agent·主管-工人]"
 TAG_DEBATE = "[多Agent·评审团]"
+
+
+def _harden_one(agent, retries=0, timeout=None, breaker=None):
+    """给一个 Agent 包上企业级可靠性层；一项都没配就原样返回（不包 = 零开销零变化）。
+
+    HardenedAgent 是透明门：协调器只认 .ask()/.history()，包了之后它拿到的还是
+    这两个门，行为却多了 重试/超时/熔断（可靠性层的门哲学又一次兑现）。
+    同一条链的 agent 共用同一个 breaker = 同一个下游，坏了一起挡（快速失败，
+    不把雪崩传给用户）。retries/timeout/breaker 语义见 reliability.py。
+    """
+    if agent is None:
+        return agent
+    if retries <= 0 and timeout is None and breaker is None:
+        return agent
+    return HardenedAgent(agent, retries=retries, timeout=timeout, breaker=breaker)
+
+
+def _trace_one(agent, tracer):
+    """tracer 给了就给 Agent 套上记账门（TracedAgent）；没给 = 原样返回（零开销）。
+
+    套的顺序有讲究：先硬化、后记账——TracedAgent(HardenedAgent(agent))。
+    可靠性层先处理重试/超时/熔断，trace 记的是"最终成败"：
+    抖动被重试救回来 → 记 ok；重试耗尽真挂了 → 记 error。病历反映真相。
+    """
+    if tracer is None or agent is None:
+        return agent
+    return TracedAgent(agent, tracer)
+
+
+def _trace_top(tracer, label):
+    """tracer 给了就开一个顶层病历段（这次协作的根）；没给 = 空段，照样跑。"""
+    if tracer is not None:
+        return tracer.trace(label)
+    return contextlib.nullcontext()
 
 
 def make_pipeline_agents(model, model_name="fake"):
@@ -62,11 +104,22 @@ def make_debate_agents(model, model_name="fake"):
 
 
 def troubleshoot(problem, model, model_name="fake",
-                 service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR):
-    """流水线排障：诊断 → 根因 → 方案。返回一段长文本（喂回主循环）。"""
+                 service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR,
+                 retries=0, timeout=None, breaker=None, tracer=None):
+    """流水线排障：诊断 → 根因 → 方案。返回一段长文本（喂回主循环）。
+
+    retries / timeout / breaker = 企业级加固（可靠性层）：给三环每个 Agent 包上
+    重试 / 超时 / 熔断。tracer = 可观测性层：每次 ask 记一段病历（谁/多久/成败）。
+    全没配 = 原样跑（默认）；agent-claude.py 配了开关就自动带上。
+    """
     try:
-        agents = make_pipeline_agents(model, model_name)
-        r = run_pipeline(agents, problem, data_dir, service_name)
+        agents = {k: _harden_one(a, retries, timeout, breaker)
+                  for k, a in make_pipeline_agents(model, model_name).items()}
+        with _trace_top(tracer, f"流水线排障：{problem[:20]}") as sp:
+            traced = {k: _trace_one(a, tracer) for k, a in agents.items()}
+            r = run_pipeline(traced, problem, data_dir, service_name)
+        if tracer is not None:
+            sp.status = "ok" if r["ok"] else "error"
         if not r["ok"]:
             return f"{TAG_PIPELINE} 中断（{r.get('stage')}）：{r.get('error')}"
         parts = [
@@ -84,11 +137,25 @@ def troubleshoot(problem, model, model_name="fake",
 
 
 def ops_report(problem, model, model_name="fake",
-               service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR):
-    """主管-工人：拆活分工，主管汇总成一份报告。返回文本。"""
+               service_name=DEFAULT_SERVICE, data_dir=DEFAULT_DATA_DIR,
+               retries=0, timeout=None, breaker=None, tracer=None):
+    """主管-工人：拆活分工，主管汇总成一份报告。返回文本。
+
+    retries / timeout / breaker / tracer = 企业级加固（可靠性层 + 可观测性层），
+    同 troubleshoot。
+    """
     try:
         boss, workers = make_orchestrator_agents(model, model_name)
-        r = run_orchestrator(boss, workers, problem, data_dir, service_name)
+        boss = _harden_one(boss, retries, timeout, breaker)
+        workers = {k: _harden_one(a, retries, timeout, breaker)
+                   for k, a in workers.items()}
+        with _trace_top(tracer, f"主管-工人报告：{problem[:20]}") as sp:
+            r = run_orchestrator(_trace_one(boss, tracer),
+                                 {k: _trace_one(a, tracer)
+                                  for k, a in workers.items()},
+                                 problem, data_dir, service_name)
+        if tracer is not None:
+            sp.status = "ok" if r["ok"] else "error"
         if not r["ok"]:
             return f"{TAG_ORCHESTRATOR} 主管没说上话，报告出不来。"
         return f"{TAG_ORCHESTRATOR} 任务：{problem}\n\n" + r["report"]
@@ -96,11 +163,25 @@ def ops_report(problem, model, model_name="fake",
         return f"{TAG_ORCHESTRATOR} 执行失败：{exc}"
 
 
-def interview_prep(question, model, model_name="fake"):
-    """评审团：同一道题三个专家各答，主席汇总满分答案。返回文本。"""
+def interview_prep(question, model, model_name="fake",
+                   retries=0, timeout=None, breaker=None, tracer=None):
+    """评审团：同一道题三个专家各答，主席汇总满分答案。返回文本。
+
+    retries / timeout / breaker / tracer = 企业级加固（可靠性层 + 可观测性层），
+    同 troubleshoot。
+    """
     try:
         chair, experts = make_debate_agents(model, model_name)
-        r = run_debate(chair, experts, question)
+        chair = _harden_one(chair, retries, timeout, breaker)
+        experts = {k: _harden_one(a, retries, timeout, breaker)
+                   for k, a in experts.items()}
+        with _trace_top(tracer, f"评审团：{question[:20]}") as sp:
+            r = run_debate(_trace_one(chair, tracer),
+                           {k: _trace_one(a, tracer)
+                            for k, a in experts.items()},
+                           question)
+        if tracer is not None:
+            sp.status = "ok" if r["ok"] else "error"
         if not r["ok"]:
             return f"{TAG_DEBATE} 主席没说上话，汇总出不来。"
         return f"{TAG_DEBATE} 面试题：{question}\n\n" + r["summary"]

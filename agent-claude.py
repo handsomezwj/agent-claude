@@ -37,7 +37,7 @@ if sys.platform == "win32":
 load_dotenv(Path(__file__).parent / ".env")
 
 # 复用"被测试过"的护栏逻辑（learn-agent/spin_guard.py，被 508 个检查保护）。
-# 生产项目里 spin_guard 应该是一个独立包；教学目录里先直接借用。
+# 生产项目里 spin_guard 应该是一个独立包；课程里先直接借课程目录的。
 sys.path.insert(0, str(Path(__file__).parent / "learn-agent"))
 from spin_guard import make_fingerprint, track_repeat
 from context import trim_history
@@ -51,6 +51,8 @@ from embedding_models import try_load_model, REAL_MIN_SIM
 from memory_store import MemoryStore, build_memory_prompt, remember_last_turn
 from itops_guard import guard_command, load_service_registry, check_service_status, read_log_safely
 from multiagent_tools import troubleshoot, ops_report, interview_prep
+from reliability import CircuitBreaker
+from observability import Tracer
 
 # ---------------------------------------------------------------------------
 # Client — 与 Claude Code 使用相同的环境变量
@@ -66,57 +68,57 @@ MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "16000"))
 # DeepSeek 等第三方端点可能不支持 thinking，通过环境变量控制
 USE_THINKING = os.environ.get("ANTHROPIC_USE_THINKING", "false").lower() == "true"
 
-# --- 护栏：兜底圈数 + 打转阈值 ---
+# --- 护栏（第三、四课）：兜底圈数 + 打转阈值 ---
 MAX_ITERS = 6       # 一轮最多 6 圈，第 7 圈检查就拦住，不白打
 MAX_REPEATS = 3     # 同一工具 + 同样参数连用 3 次 = 打转，刹车
 
-# --- 上下文护栏：每次发 API 前，把输入裁到预算以内 ---
+# --- 上下文护栏（第十课）：每次发 API 前，把输入裁到预算以内 ---
 # 预留 16000 给输出 + 一点给 system/tools，剩下的才是输入能占的。
 CONTEXT_BUDGET = 40000
 
-# --- 裁判护栏：这轮回答完，请一台 LLM 打分（可关：CLAUDE_USE_JUDGE=false）---
+# --- 裁判护栏（第九课）：这轮回答完，请一台 LLM 打分（可关：CLAUDE_USE_JUDGE=false）---
 USE_JUDGE = os.environ.get("CLAUDE_USE_JUDGE", "true").lower() == "true"
 
-# --- 摘要护栏：超预算时把最老对话压成摘要，而不是纯扔掉（可关：CLAUDE_USE_SUMMARY=false）---
+# --- 摘要护栏（第十一课）：超预算时把最老对话压成摘要，而不是纯扔掉（可关：CLAUDE_USE_SUMMARY=false）---
 USE_SUMMARY = os.environ.get("CLAUDE_USE_SUMMARY", "true").lower() == "true"
 
-# --- 流式输出：边生成边打字机吐字，不憋一口气（可关：CLAUDE_USE_STREAMING=false）---
+# --- 流式输出（第十四课）：边生成边打字机吐字，不憋一口气（可关：CLAUDE_USE_STREAMING=false）---
 USE_STREAMING = os.environ.get("CLAUDE_USE_STREAMING", "true").lower() == "true"
 
-# --- MCP 工具接入：工具不写死在代码里，问一个独立小程序要（可关：CLAUDE_USE_MCP=false）---
+# --- MCP 工具接入（第十五课）：工具不写死在代码里，问一个独立小程序要（可关：CLAUDE_USE_MCP=false）---
 # 配了 CLAUDE_MCP_SERVER（一条启动服务器的命令）才去连；连不上就优雅降级，只用内置工具。
 USE_MCP = os.environ.get("CLAUDE_USE_MCP", "true").lower() == "true"
 MCP_SERVER_COMMAND = os.environ.get("CLAUDE_MCP_SERVER", "").strip()
 
-# --- RAG 检索增强：提问前先在你自己的知识库里"检索最相关的几段"再回答 ---
+# --- RAG 检索增强（第十六课）：提问前先在你自己的知识库里"检索最相关的几段"再回答 ---
 # 默认读 learn-agent/knowledge.md；可用 CLAUDE_RAG_FILE 指定别的文件；CLAUDE_USE_RAG=false 可关。
 USE_RAG = os.environ.get("CLAUDE_USE_RAG", "true").lower() == "true"
 CLAUDE_RAG_FILE = os.environ.get("CLAUDE_RAG_FILE", "").strip()
 RAG_TOP_K = int(os.environ.get("CLAUDE_RAG_TOP_K", "2"))
 RAG_CHUNK_SIZE = int(os.environ.get("CLAUDE_RAG_CHUNK_SIZE", "200"))
 RAG_CHUNKS: list[str] = []   # 加载好的知识块；空 = RAG 没开
-# --- 向量检索：默认开。把文字变向量、按余弦相似度找最像的块，比关键词打分更准。
-# 本地用"词袋向量"当假门（免费可复现）；起不来就优雅降级回关键词打分。
+# --- 向量检索（第十七课）：默认开。把文字变向量、按余弦相似度找最像的块，比关键词打分更准。
+# 本地用"词袋向量"当假门（免费可复现）；起不来就优雅降级回第十六课的关键词打分。
 USE_EMBEDDING = os.environ.get("CLAUDE_USE_EMBEDDING", "true").lower() == "true"
 RAG_EMBEDDER = None            # BowEmbedder 或 ModelEmbedder 实例；None = 用关键词打分
 RAG_CHUNK_VECTORS: list = []   # 启动时算好每块的向量，提问时不再重算
-# --- 真向量模型：配了 CLAUDE_EMBEDDING_MODEL（如 BAAI/bge-small-zh-v1.5）
+# --- 真向量模型（第十八课）：配了 CLAUDE_EMBEDDING_MODEL（如 BAAI/bge-small-zh-v1.5）
 # 就把检索从"词袋假门"升级成"真模型语义检索"。首次会下载 ~100MB，之后离线可用；
 # 加载失败自动回退假门，绝不崩。真模型没有"正好 0"，阈值要抬高（REAL_MIN_SIM）。
 CLAUDE_EMBEDDING_MODEL = os.environ.get("CLAUDE_EMBEDDING_MODEL", "").strip()
 RAG_MIN_SIM = 0.0              # 词袋假门用 0（撞不上 = 0）；真模型用 REAL_MIN_SIM
 
-# --- 长记忆：把重要的事写进"记事本"文件，下次启动还记得（可关：CLAUDE_USE_MEMORY=false）
-# 模型失忆、messages 只活在内存里，程序一关就清零——记事本把"关于用户的
+# --- 长记忆（第二十一课）：把重要的事写进"记事本"文件，下次启动还记得（可关：CLAUDE_USE_MEMORY=false）
+# 模型失忆（第一课）、messages 只活在内存里，程序一关就清零——记事本把"关于用户的
 # 事实"落盘到 JSON 文件，启动时读回来贴进 system prompt。文件放在 agent-claude.py
-# 旁边而不是 learn-agent/ 里，免得教学目录被用户隐私污染、误提交到 GitHub。
+# 旁边而不是 learn-agent/ 里，免得课程目录被用户隐私污染、误提交到 GitHub。
 USE_MEMORY = os.environ.get("CLAUDE_USE_MEMORY", "true").lower() == "true"
 MEMORY_FILE = os.environ.get("CLAUDE_MEMORY_FILE", "").strip() or str(
     Path(__file__).parent / "agent_memory.json"
 )
 MEMORY_MAX_ITEMS = int(os.environ.get("CLAUDE_MEMORY_MAX_ITEMS", "50"))
 
-# --- IT 运维助手：只读诊断 + 破坏性命令安全护栏（可关：CLAUDE_USE_IT_OPS=false）
+# --- IT 运维助手（第二十二课）：只读诊断 + 破坏性命令安全护栏（可关：CLAUDE_USE_IT_OPS=false）
 # 真实业务场景：查服务状态、查日志找故障现场，但删除/重启/杀进程一律拒绝。
 # 数据目录默认 learn-agent/ops_demo（假服务 + 假日志），可用 CLAUDE_OPS_DATA_DIR 指定。
 USE_IT_OPS = os.environ.get("CLAUDE_USE_IT_OPS", "true").lower() == "true"
@@ -124,10 +126,42 @@ OPS_DATA_DIR = os.environ.get("CLAUDE_OPS_DATA_DIR", "").strip() or str(
     Path(__file__).parent / "learn-agent" / "ops_demo"
 )
 
-# --- 多 Agent 协作（多 Agent）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
+# --- 多 Agent 协作（多 Agent 专项）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
 # 三种模式各自内部会调模型 3~4 次（每环/每人一次），结果更全面、上下文彼此隔离；
 # 数据目录复用 IT 运维的 ops_demo（同款假服务 + 假日志），护栏也是同一套。
 USE_MULTIAGENT = os.environ.get("CLAUDE_USE_MULTIAGENT", "true").lower() == "true"
+
+# --- 企业级加固 · 可靠性层（可关：CLAUDE_USE_RELIABILITY=false）
+# 真实世界的下游会抽风：网络抖动 / 限流 / 超时。把多 Agent 工具里的每一条模型调用
+# （一次 3~4 条）包上 熔断 + 重试：重试扛瞬时抖动（指数退避）、熔断防把已坏的下游
+# 打到雪崩。单条卡死不拖垮整条链；再坏的场景也只优雅降级，绝不崩。
+# 默认：重试 2 次、连续 5 次失败熔断 30 秒。超时不默认开——模型生成长回答可能
+# 超过几十秒，超时是把双刃剑，设太小会误杀长回答；留给部署时按观测调。
+USE_RELIABILITY = os.environ.get("CLAUDE_USE_RELIABILITY", "true").lower() == "true"
+CLAUDE_MODEL_RETRIES = int(os.environ.get("CLAUDE_MODEL_RETRIES", "2"))
+CLAUDE_MODEL_BREAK_AFTER = int(os.environ.get("CLAUDE_MODEL_BREAK_AFTER", "5"))
+CLAUDE_MODEL_BREAK_RECOVER = float(os.environ.get("CLAUDE_MODEL_BREAK_RECOVER", "30"))
+
+# 多 Agent 工具共用同一个熔断器 = 共用一个下游，坏了一起挡。
+_MODEL_BREAKER = (
+    CircuitBreaker(fail_threshold=CLAUDE_MODEL_BREAK_AFTER,
+                   recovery_time=CLAUDE_MODEL_BREAK_RECOVER)
+    if USE_RELIABILITY else None
+)
+# 传给多 Agent 工具的关键字；没配就传空 = 工具保持"原样"行为（零变化）。
+_RELIABILITY_KW = (
+    {"retries": CLAUDE_MODEL_RETRIES, "breaker": _MODEL_BREAKER}
+    if USE_RELIABILITY else {}
+)
+
+# --- 企业级加固 · 可观测性层（可关：CLAUDE_USE_TRACE=false）
+# 多 Agent 一次要调 3~4 次模型，黑盒里看不到"哪一环慢/哪一环挂/跑了多久"。
+# 配了 trace，每次多 Agent 协作就留一份"病历"：谁、状态、耗时。
+# 病历只打到终端给你看（人类运维视角）+ 可选存档；绝不塞进返回文本，
+# 模型拿到的还是干净的答案——观测不污染业务。
+USE_TRACE = os.environ.get("CLAUDE_USE_TRACE", "true").lower() == "true"
+# 可选：病历存档到文件（一行 = 一次运行的完整病历 JSON），重启后还能回放
+_TRACE_FILE = os.environ.get("CLAUDE_TRACE_FILE", "").strip()
 
 MEMORY: MemoryStore | None = None   # 记事本实例；None = 记忆没开
 
@@ -254,7 +288,7 @@ TOOLS: list[ToolParam] = [
     },
 ]
 
-# IT 运维业务工具（只读诊断 + 安全护栏；可关：CLAUDE_USE_IT_OPS=false）
+# 第二十二课：IT 运维业务工具（只读诊断 + 安全护栏；可关：CLAUDE_USE_IT_OPS=false）
 if USE_IT_OPS:
     TOOLS += [
         {
@@ -295,7 +329,7 @@ if USE_IT_OPS:
         },
     ]
 
-# 多 Agent 协作（多 Agent）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
+# 多 Agent 协作（多 Agent 专项）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
 if USE_MULTIAGENT:
     TOOLS += [
         {
@@ -350,7 +384,7 @@ if USE_MULTIAGENT:
         },
     ]
 
-# MCP 连上后，把外部工具加进这份"实际发给模型的清单"。
+# 第十五课：MCP 连上后，把外部工具加进这份"实际发给模型的清单"。
 # 默认就是内置工具；connect_mcp() 连上服务器后替换成 内置 + 外部。
 ACTIVE_TOOLS: list[ToolParam] = list(TOOLS)
 MCP_CLIENT: McpClient | None = None
@@ -428,7 +462,7 @@ def run_command(command: str) -> str:
     """Execute a shell command.  Uses shell=False with shlex splitting for safety.
     Falls back to shell=True only for commands with shell operators (|, >, <, &&, etc.).
     """
-    # 只读安全护栏——破坏性命令（删/杀/重启/写文件）一律拒绝，不执行
+    # 第二十二课：只读安全护栏——破坏性命令（删/杀/重启/写文件）一律拒绝，不执行
     allowed, reason = guard_command(command)
     if not allowed:
         return (
@@ -482,9 +516,48 @@ def query_log(service_name: str, keyword: str = "", tail_lines: int = 20) -> str
 # ---------------------------------------------------------------------------
 
 
+def _save_trace(exports):
+    """把一次运行的全套病历追加存档（一行一个 JSON，CLAUDE_TRACE_FILE 配了才存）。
+
+    存档是给"事后复盘"用的：格式化函数 observability.format_text 能把
+    每行 JSON 读回来渲染成人话病历——病倒重启，病历还在。
+    """
+    with open(_TRACE_FILE, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(exports, ensure_ascii=False) + "\n")
+
+
+def call_multiagent(tool_call):
+    """执行一次多 Agent 协作工具调用，统一注入可靠性 + 可观测性两份企业级配置。
+
+    tool_call 是"只差一份配置"的调用（troubleshoot/ops_report/interview_prep 三个
+    工具签名不同，这里用 lambda 收尾），例如：
+        call_multiagent(lambda **kw: troubleshoot(problem, client, MODEL,
+                          service_name=service_name, data_dir=OPS_DATA_DIR, **kw))
+
+    可靠性 kw（重试/熔断，_RELIABILITY_KW）和 trace 配置由这里统一注入：
+    每次调用开一本新"病历本"，跑完把病历打到终端给你看（可选存档到 _TRACE_FILE）。
+    trace 只读不改：返回文本 = 模型该看的干净答案，病历 = 另起一行给人看的。
+    """
+    tracer = Tracer() if USE_TRACE else None
+    kw = dict(_RELIABILITY_KW)
+    if tracer is not None:
+        kw["tracer"] = tracer
+    output = tool_call(**kw)
+    if tracer is not None:
+        print("\n--- 可观测性病历（谁 / 状态 / 耗时）---")
+        print(tracer.as_text())
+        if _TRACE_FILE:
+            try:
+                _save_trace(tracer.export())
+            except OSError as exc:
+                print(f"[trace 存档失败]: {exc}")
+        print("------------------------------------")
+    return output
+
+
 def execute_tool(name: str, args: dict) -> str:
     """Route a tool-use block to the correct implementation and return its result."""
-    # 如果是 MCP 服务器提供的工具，交给它执行
+    # 第十五课：如果是 MCP 服务器提供的工具，交给它执行
     if MCP_CLIENT is not None and name in MCP_TOOL_NAMES:
         print(f"[MCP工具]: {name}({args})")
         return MCP_CLIENT.call_tool(name, args)
@@ -534,8 +607,10 @@ def execute_tool(name: str, args: dict) -> str:
         problem = str(args.get("problem", "服务好像挂了，帮我排查一下")).strip()
         service_name = str(args.get("service_name", "order-api"))
         print(f"[多Agent·流水线]: {problem}")
-        output = troubleshoot(problem, client, MODEL,
-                              service_name=service_name, data_dir=OPS_DATA_DIR)
+        output = call_multiagent(
+            lambda **kw: troubleshoot(problem, client, MODEL,
+                                      service_name=service_name,
+                                      data_dir=OPS_DATA_DIR, **kw))
         print(f"[流水线结果]: {output[:200]}...")
         return output
 
@@ -543,15 +618,18 @@ def execute_tool(name: str, args: dict) -> str:
         problem = str(args.get("problem", "帮我出一份排查报告")).strip()
         service_name = str(args.get("service_name", "order-api"))
         print(f"[多Agent·主管-工人]: {problem}")
-        output = ops_report(problem, client, MODEL,
-                            service_name=service_name, data_dir=OPS_DATA_DIR)
+        output = call_multiagent(
+            lambda **kw: ops_report(problem, client, MODEL,
+                                    service_name=service_name,
+                                    data_dir=OPS_DATA_DIR, **kw))
         print(f"[报告结果]: {output[:200]}...")
         return output
 
     elif name == "interview_prep":
         question = str(args.get("question", "")).strip()
         print(f"[多Agent·评审团]: {question}")
-        output = interview_prep(question, client, MODEL)
+        output = call_multiagent(
+            lambda **kw: interview_prep(question, client, MODEL, **kw))
         print(f"[答案结果]: {output[:200]}...")
         return output
 
@@ -565,10 +643,10 @@ def execute_tool(name: str, args: dict) -> str:
 
 
 def connect_mcp():
-    """启动时问 MCP 服务器"你有什么工具"，把它的工具加进清单。
+    """第十五课：启动时问 MCP 服务器"你有什么工具"，把它的工具加进清单。
 
     优雅降级：服务器连不上 / 握手失败，就打一行日志，继续用内置工具——
-    绝不让 agent 崩。这就是 resume-advisor 学过的"优雅降级 ≠ 静默吞错"。
+    绝不让 agent 崩。这就是 resume-advisor 那课学过的"优雅降级 ≠ 静默吞错"。
     """
     global ACTIVE_TOOLS, MCP_CLIENT, MCP_TOOL_NAMES
     if not (USE_MCP and MCP_SERVER_COMMAND):
@@ -589,7 +667,7 @@ def connect_mcp():
 
 
 def connect_rag():
-    """启动时加载你的知识库，切好块。之后提问前会先检索再回答。
+    """第十六课：启动时加载你的知识库，切好块。之后提问前会先检索再回答。
 
     优雅降级：没找到文件 / 读失败，就打一行日志，等于 RAG 没开，照常聊天。
     """
@@ -608,7 +686,7 @@ def connect_rag():
         print(f"[RAG] 加载失败，跳过：{exc}")
         RAG_CHUNKS = []
         return
-    # 默认升级成向量检索（词袋假向量，免费可复现）；起不来就降级回关键词打分
+    # 第十七课：默认升级成向量检索（词袋假向量，免费可复现）；起不来就降级回关键词打分
     if USE_EMBEDDING:
         try:
             vocab = build_vocab(RAG_CHUNKS)
@@ -621,7 +699,7 @@ def connect_rag():
             RAG_EMBEDDER = None
             RAG_CHUNK_VECTORS = []
             return
-        # 配了真模型就换真门（语义检索，番茄能搜到西红柿）；换不上保持假门
+        # 第十八课：配了真模型就换真门（语义检索，番茄能搜到西红柿）；换不上保持假门
         if CLAUDE_EMBEDDING_MODEL and RAG_EMBEDDER is not None:
             real, err = try_load_model(CLAUDE_EMBEDDING_MODEL)
             if real is not None:
@@ -634,7 +712,7 @@ def connect_rag():
 
 
 def connect_memory():
-    """启动时打开"记事本"，把以前存的事实读回来。
+    """第二十一课：启动时打开"记事本"，把以前存的事实读回来。
 
     优雅降级：文件坏 / 读不了 → 空记忆照常聊，绝不让 agent 崩。
     记事本打不开就这轮先不记（MEMORY = None），记忆是身外之物，命是主循环。
@@ -652,7 +730,7 @@ def connect_memory():
 
 
 def build_system_text():
-    """system prompt + 长期记忆。
+    """system prompt + 长期记忆（第二十一课）。
 
     记忆不是贴在 messages 里——system 每次发 API 都会被带上一份，
     所以模型"一开场就知道你是谁"。记忆在 store 里，改一条，下一轮自动生效。
@@ -682,7 +760,7 @@ def handle_user_turn(messages):
     """处理一轮用户输入，直到模型给出最终回答或护栏介入。
 
     返回值：这轮怎么结束的（"END_TURN" / "STUCK" / "MAX_ITERS" / "API_ERROR" / "OTHER"）。
-    抽成函数的原因：给循环一个"门"，它才能被假模型驱动、被测试驱动。
+    抽成函数的原因：给循环一个"门"，它才能被假模型驱动、被测试驱动（第八课）。
     """
     turn = 0
     last_call = None      # 打转护栏：上一道菜长什么样
@@ -700,8 +778,8 @@ def handle_user_turn(messages):
         kwargs = dict(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=build_system_text(),   # system prompt + 长期记忆
-            tools=ACTIVE_TOOLS,   # 内置工具 + 可能连上的 MCP 外部工具
+            system=build_system_text(),   # 第二十一课：system prompt + 长期记忆
+            tools=ACTIVE_TOOLS,   # 第十五课：内置工具 + 可能连上的 MCP 外部工具
             messages=sanitize(trimmed),
         )
         if USE_THINKING:
@@ -799,7 +877,7 @@ def handle_user_turn(messages):
 
 
 def judge_last_turn(messages):
-    """裁判：这轮回答完了，请一台 LLM 给回答打 0-5 分（质量护栏）。
+    """第九课的裁判：这轮回答完了，请一台 LLM 给回答打 0-5 分（质量护栏）。
 
     只做最朴素的事：抽出"最近的问题 + 最近的回答"，请裁判打分。
     打不出分（模型跑了、格式跑偏）就优雅降级，绝不让主循环崩。
@@ -847,13 +925,25 @@ def main():
     print(f"Claude Agent 就绪 (模型: {MODEL})")
     print("输入消息与 Claude 对话，Ctrl+C 退出\n")
 
-    # 问 MCP 服务器要外部工具（连不上就优雅降级，只用内置工具）
+    # 企业级加固 · 可靠性层：多 Agent 工具的重试 / 熔断装配状态
+    if USE_RELIABILITY:
+        print(f"[可靠性] 多 Agent 工具已硬化：每条模型调用重试 {CLAUDE_MODEL_RETRIES} 次、"
+              f"连续 {CLAUDE_MODEL_BREAK_AFTER} 次失败熔断 {CLAUDE_MODEL_BREAK_RECOVER} 秒"
+              f"（CLAUDE_USE_RELIABILITY=false 可关）")
+
+    # 企业级加固 · 可观测性层：每次多 Agent 协作打印病历（谁 / 状态 / 耗时）
+    if USE_TRACE:
+        trace_note = f"，并存档到 {_TRACE_FILE}" if _TRACE_FILE else ""
+        print(f"[可观测性] 每次多 Agent 协作会打印病历（谁/状态/耗时）"
+              f"{trace_note}（CLAUDE_USE_TRACE=false 可关）")
+
+    # 第十五课：问 MCP 服务器要外部工具（连不上就优雅降级，只用内置工具）
     connect_mcp()
 
-    # 加载知识库、切好块（没找到就优雅降级，等于没开 RAG）
+    # 第十六课：加载知识库、切好块（没找到就优雅降级，等于没开 RAG）
     connect_rag()
 
-    # 打开"记事本"，把以前存的事实读回来（打不开就这轮先不记）
+    # 第二十一课：打开"记事本"，把以前存的事实读回来（打不开就这轮先不记）
     connect_memory()
 
     while True:
@@ -866,16 +956,16 @@ def main():
         if not user_input.strip():
             continue
 
-        # 先在你自己的知识库里检索最相关的几块，塞在问题前面。
+        # 第十六课：先在你自己的知识库里检索最相关的几块，塞在问题前面。
         # 注意顺序：资料块必须在真问题【之前】——裁判护栏认"最后一条用户消息"是任务，
         # 检索结果放前面才不会把"资料"当成要打分的那道题。
-        # 默认用向量检索（词袋假向量，免费）；起不来就回退关键词打分。
+        # 第十七课：默认用向量检索（词袋假向量，免费）；起不来就回退关键词打分。
         if RAG_CHUNKS:
             if RAG_EMBEDDER is not None:
                 context = embed_retrieve(
                     user_input, RAG_CHUNKS, RAG_TOP_K,
                     RAG_EMBEDDER.embed, chunk_vectors=RAG_CHUNK_VECTORS,
-                    min_sim=RAG_MIN_SIM,   # 真模型没"正好 0"，阈值抬高
+                    min_sim=RAG_MIN_SIM,   # 第十八课：真模型没"正好 0"，阈值抬高
                 )
             else:
                 context = keyword_retrieve(user_input, RAG_CHUNKS, RAG_TOP_K)
@@ -889,11 +979,11 @@ def main():
         # 处理这一轮：工具循环 + 护栏，全在 handle_user_turn 里
         outcome = handle_user_turn(messages)
 
-        # 裁判护栏：这轮好好回答完，就请一台 LLM 打分
+        # 裁判护栏（第九课）：这轮好好回答完，就请一台 LLM 打分
         if outcome == "END_TURN" and USE_JUDGE:
             judge_last_turn(messages)
 
-        # 长记忆：这轮好好回答完了，把刚学到的事实写进记事本。
+        # 长记忆（第二十一课）：这轮好好回答完了，把刚学到的事实写进记事本。
         # 规则提取免费可测；生产可换成 LLM 提炼（extract_facts 的 extractor 门）。
         if outcome == "END_TURN" and MEMORY is not None:
             added = remember_last_turn(MEMORY, messages)
