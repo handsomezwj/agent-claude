@@ -20,6 +20,7 @@
 - **企业级加固 · 可靠性层**：真实下游会挂——**重试**（指数退避扛瞬时抖动）+ **超时**（线程限时防傻等）+ **熔断**（保险丝状态机防雪崩，冷却后试探恢复）；`HardenedAgent` 透明包装接入每条多 Agent 模型调用，协调器无感（`CLAUDE_USE_RELIABILITY` 可关、次数/阈值/冷却可调）
 - **企业级加固 · 可观测性层**：每次多 Agent 协作自动留一份 trace「病历」（谁/状态/耗时，嵌套 span 树），控制台打印 + 可落盘回放，一眼定位哪一环慢/挂/被熔断挡住；病历只打印不污染返回文本（`CLAUDE_USE_TRACE` 可关、`CLAUDE_TRACE_FILE` 存档）
 - **企业级加固 · 分级模型（省钱路由）**：多 Agent 一次调 3~4 次模型，按「角色→档位」策略表给不同环节发不同档位模型——推理主战场（诊断/根因/专家）用旗舰档，机械整理环（方案官把根因翻成步骤、查状态工人）降经济档（输出有安全护栏兜底，降档不掉质量）；成本 = 输出字符 × 档位单价，可算省钱比例（离线示例：流水线省约 20%）。三档模型名 `CLAUDE_MODEL_CHEAP/MID/TOP` 配了才分流，全不配 = 每角色仍发默认模型、行为不变（`CLAUDE_USE_TIERS` 可关）
+- **网页版对话界面（webchat）**：把命令行 Agent 包成一个像 App 的聊天页。`webchat/agent_brain.py` 把主程序当模块加载、复用同一套主循环与护栏（**agent 一行不改**），`webchat/app.py` 用 Flask + SSE 把「工具活动日志 → 最终回答」流式推给页面：工具调用实时滚动可见、回答打字机输出。默认离线演示模式（脚本话术，零成本）也可切真模型（`AGENT_WEB_MODE=fake|real`）
 - **四层生产护栏**：
   - 最大轮数兜底：迭代超过上限强制停（防死循环）
   - 原地打转检测：连续「同工具同参数」自动刹车
@@ -30,7 +31,7 @@
 - **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
-- **自动化测试**：337 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **自动化测试**：349 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
 ## 快速开始
@@ -43,6 +44,14 @@ cp .env.example .env
 # 编辑 .env，填入 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
 
 python agent-claude.py
+```
+
+### 网页版对话界面（可选）
+
+```bash
+python learn-agent/webchat/app.py              # 离线演示模式（脚本话术，零成本）
+AGENT_WEB_MODE=real python learn-agent/webchat/app.py   # 切真模型
+# 浏览器打开 http://127.0.0.1:5001
 ```
 
 ## 环境变量
@@ -121,7 +130,13 @@ python agent-claude.py
 │   ├── 21-itops.py        # IT 运维专项示例（离线剧本演示护栏）
 │   ├── ops_demo/          # 运维演示数据（services.json 服务注册表 + app.log 故障现场 + demo_service.py）
 │   ├── *.py               # 每个能力的可运行示例
-│   ├── test_*.py          # 337 个 unittest（FakeModel，零成本）
+│   ├── webchat/           # 网页版对话界面（Flask + SSE；agent 主循环当模块复用）
+│   │   ├── app.py             # 路由 + SSE 流式推送（活动日志实时 / 回答打字机）
+│   │   ├── agent_brain.py     # 加载主程序为模块 + 离线假脑子 / 实时日志队列
+│   │   ├── templates/index.html
+│   │   ├── static/            # app.js（SSE + 打字机）、style.css
+│   │   └── test_webchat.py    # 12 个 unittest
+│   ├── test_*.py          # 349 个 unittest（FakeModel，零成本）
 │   └── knowledge.md       # RAG 默认知识库
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
@@ -145,7 +160,7 @@ python agent-claude.py
 cd learn-agent && python -m unittest discover -p "test_*.py"
 ```
 
-337 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式）。
+349 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式），以及网页版界面（离线剧本跑通完整一轮主循环 / 活动日志按整行实时推送并在 `[Agent回答]` 处封口 / 页面渲染与会话 cookie / SSE 先日志后回答）。
 
 ## 说明
 
