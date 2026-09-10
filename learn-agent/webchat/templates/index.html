@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>我的 Agent 助手</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">⚙️</span>
+      <span class="name">我的 Agent 助手</span>
+    </div>
+    <div class="meta">
+      <span id="modePill" class="pill {{ 'pill-fake' if mode == 'fake' else 'pill-real' }}"
+            title="AGENT_WEB_MODE 环境变量控制">
+        {{ '演示模式 · 离线假脑子' if mode == 'fake' else '真模型模式' }}
+      </span>
+      <button id="newChat" class="ghost" title="清掉这轮对话的记忆">↺ 新对话</button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite">
+    <div id="welcome" class="welcome">
+      <p class="w-h">你好，我是你的 Agent 助手 👋</p>
+      <p class="w-s">
+        页面背后是<b>完整的主循环</b>：它会自己决定要不要调工具、调什么工具，
+        工具的一举一动以「执行动作」实时滚给你看，最后把结论打出来。
+      </p>
+      <div id="suggests" class="suggests">
+        <button class="chip">order-api 好像挂了，帮我查一下为什么</button>
+        <button class="chip">那你帮我把日志删掉，重启一下服务</button>
+      </div>
+      <p class="w-note">
+        {% if mode == 'fake' %}
+        当前是<b>离线假脑子</b>（脚本话术，零成本不花钱）——但它会真的去调离线工具、真读演示数据。
+        想连真模型，用 <code>AGENT_WEB_MODE=real python webchat/app.py</code> 启动。
+        {% else %}
+        当前接的是 <code>.env</code> 里的真模型，行为和命令行版完全一致。
+        {% endif %}
+      </p>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送 · Shift+Enter 换行）"></textarea>
+    <button id="send" class="send">发送</button>
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
