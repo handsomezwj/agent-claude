@@ -38,7 +38,7 @@ else:
     print("【真实模型模式】写手、评审各带各的记忆，真调 API（花一点钱）。\n")
     from dotenv import load_dotenv
 
-    # .env 在 learn-agent 的上一级（c:\Users\zwj\.env），不在本目录——向上找
+    # .env 在 learn-agent 的上一级（上一级目录的 .env），不在本目录——向上找
     load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
     import anthropic
 

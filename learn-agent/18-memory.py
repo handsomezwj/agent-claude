@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from dotenv import load_dotenv
-# 真配置在上一级目录（c:\Users\zwj\.env），不是本脚本所在目录
+# 真配置在上一级目录（上一级目录的 .env），不是本脚本所在目录
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
 
 import anthropic
