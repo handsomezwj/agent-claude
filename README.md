@@ -32,6 +32,7 @@
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
 - **自动化测试**：349 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **网页版界面 + 可部署**：Flask + SSE 把命令行 Agent 包成聊天页（活动日志实时滚动 + 回答打字机）；根目录 `app.py` + `Procfile` 可直接上云，离线演示模式无需 API key、零成本
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
 ## 快速开始
@@ -49,10 +50,27 @@ python agent-claude.py
 ### 网页版对话界面（可选）
 
 ```bash
-python learn-agent/webchat/app.py              # 离线演示模式（脚本话术，零成本）
-AGENT_WEB_MODE=real python learn-agent/webchat/app.py   # 切真模型
+python app.py                                              # 离线演示模式（脚本话术，零成本）
+AGENT_WEB_MODE=real python app.py                          # 切真模型
 # 浏览器打开 http://127.0.0.1:5001
 ```
+
+页面把命令行 Agent 包成聊天界面：**活动日志实时滚动**（`[查服务]`、`[执行命令]`… 一行行推，不等整轮跑完）+ **回答打字机**。两种模式：
+
+- **离线演示模式**（默认）：把真模型换成"按剧本演"的假脑子，但工具是**真跑**的——真的去读 `ops_demo` 的服务状态和日志、真的被安全护栏拦下破坏性命令。零成本、输出确定，适合放公网给别人点。
+- **真模型模式**：跟命令行完全一样，agent 自己决定调什么工具。
+
+### 部署到云平台（可选）
+
+根目录 `app.py` 是云平台入口（把 `learn-agent/webchat/` 的 Flask app 交出去），`Procfile` 里是启动命令：
+
+```
+web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthread
+```
+
+- 平台注入 `PORT` 时自动绑 `0.0.0.0`；本地不给 `PORT` 就还是 `127.0.0.1:5001`
+- **单 worker**：会话历史与"接管 stdout"是进程内状态，多 worker 会各聊各的
+- 云上默认就是离线演示模式，**不需要配 API key**，也不会有 key 泄漏或被人刷账单的风险
 
 ## 环境变量
 
@@ -90,6 +108,9 @@ AGENT_WEB_MODE=real python learn-agent/webchat/app.py   # 切真模型
 | `CLAUDE_MODEL_CHEAP` | 经济档模型名（机械/模板化整理环用） | （空 = 用默认模型） |
 | `CLAUDE_MODEL_MID` | 标准档模型名（常规推理环用） | （空 = 用默认模型） |
 | `CLAUDE_MODEL_TOP` | 旗舰档模型名（强推理/高价值环用） | （空 = 用默认模型） |
+| `AGENT_WEB_MODE` | 网页版模式：`fake` 离线演示 / `real` 真模型 | `fake` |
+| `PORT` | 网页版监听端口（云平台自动注入） | `5001` |
+| `HOST` | 网页版监听网卡（有 `PORT` 时默认 `0.0.0.0`） | 见左 |
 
 ## 项目结构
 
@@ -138,6 +159,8 @@ AGENT_WEB_MODE=real python learn-agent/webchat/app.py   # 切真模型
 │   │   └── test_webchat.py    # 12 个 unittest
 │   ├── test_*.py          # 349 个 unittest（FakeModel，零成本）
 │   └── knowledge.md       # RAG 默认知识库
+├── app.py             # 云平台入口（薄壳：把 learn-agent/webchat 的 Flask app 交出去）
+├── Procfile           # 云平台启动命令（gunicorn app:app，单 worker）
 ├── requirements.txt   # 依赖
 └── .env.example       # 环境变量模板
 ```
