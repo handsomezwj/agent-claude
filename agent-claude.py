@@ -32,11 +32,17 @@ from dotenv import load_dotenv
 if sys.platform == "win32":
     sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", errors="replace", buffering=1)
     sys.stderr = open(sys.stderr.fileno(), mode="w", encoding="utf-8", errors="replace", buffering=1)
+    # 输入也要修：Windows 上 sys.stdin 是 gbk + surrogateescape。手动打字走控制台
+    # Unicode 通道没事，但只要输入来自管道/重定向（脚本、自动化、`echo 问 | python ...`），
+    # UTF-8 中文会被按 GBK 解，解不出的字节变成"孤立代理字符"（\udcaf 这种）——
+    # 一路带进 task 和 messages，最后在 SDK 编码请求体时炸（真踩过：裁判护栏报
+    # surrogates not allowed，而 stdout 明明是干净的，因为坏字符是从 stdin 进来的）。
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 
 # 从脚本所在目录加载 .env，确保无论从哪里运行都能找到
 load_dotenv(Path(__file__).parent / ".env")
 
-# 复用"被测试过"的护栏逻辑（learn-agent/spin_guard.py，被 349 个检查保护）。
+# 复用"被测试过"的护栏逻辑（learn-agent/spin_guard.py，被 384 个检查保护）。
 # 生产项目里 spin_guard 应该是一个独立包；课程里先直接借课程目录的。
 sys.path.insert(0, str(Path(__file__).parent / "learn-agent"))
 from spin_guard import make_fingerprint, track_repeat
@@ -50,6 +56,12 @@ from embedding import BowEmbedder, build_vocab, retrieve_top_k as embed_retrieve
 from embedding_models import try_load_model, REAL_MIN_SIM
 from memory_store import MemoryStore, build_memory_prompt, remember_last_turn
 from itops_guard import guard_command, load_service_registry, check_service_status, read_log_safely
+from remote_ops import (
+    remote_health as remote_health_text,
+    remote_logs as remote_logs_text,
+    remote_service as remote_service_text,
+    runner_from_env,
+)
 from multiagent_tools import troubleshoot, ops_report, interview_prep
 from reliability import CircuitBreaker
 from observability import Tracer
@@ -126,6 +138,12 @@ USE_IT_OPS = os.environ.get("CLAUDE_USE_IT_OPS", "true").lower() == "true"
 OPS_DATA_DIR = os.environ.get("CLAUDE_OPS_DATA_DIR", "").strip() or str(
     Path(__file__).parent / "learn-agent" / "ops_demo"
 )
+
+# --- 真主机巡检（第二十三课）：走 SSH 去真 Linux 上做只读诊断（可关：不配主机就是关的）
+# 上面那套用的是 ops_demo 里的假服务/假日志；这一套连真主机，拿到的是真 systemd / 真 journal。
+# 默认关闭：不设 CLAUDE_OPS_SSH_HOST 就完全走老路，行为与以前一模一样。
+# 三道门全在 remote_ops 里：参数白名单（服务名正则）→ 客户端黑名单 → 远端命令白名单。
+OPS_SSH = runner_from_env()
 
 # --- 多 Agent 协作（多 Agent 专项）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
 # 三种模式各自内部会调模型 3~4 次（每环/每人一次），结果更全面、上下文彼此隔离；
@@ -233,6 +251,14 @@ SKILL_LOADER = SkillLoader(SKILLS_DIR)
 # System prompt
 # ---------------------------------------------------------------------------
 
+# 配了远端主机才把"真机巡检"这条给模型看——没工具却被告知要用，它会瞎编
+_REMOTE_RULE = (
+    "\n   - 问的是真主机时（「某个服务怎么了 / 机器健康吗」），用 remote_service / remote_logs / "
+    "remote_health 走 SSH 去真 Linux 上查，拿到的是真 systemd 状态和真 journal 日志；"
+    "check_service / query_log 查的是本地演示数据，两者别搞混"
+    if OPS_SSH else ""
+)
+
 SYSTEM_PROMPT = f"""
 你是 lcc，一个 AI 助手。你必须始终使用中文进行回复。
 
@@ -240,7 +266,7 @@ SYSTEM_PROMPT = f"""
 1. 所有回答必须使用中文，包括思考过程和技术术语
 2. 遇到不熟悉的专题时，请先调用 load_skill 工具加载对应的知识，再给出回答
 3. 保持回答简洁、准确、有帮助
-4. 遇到服务/日志/运维类问题，优先用 check_service / query_log 做只读排查；删除、重启、杀进程类操作一律拒绝，需人工确认
+4. 遇到服务/日志/运维类问题，优先用 check_service / query_log 做只读排查；删除、重启、杀进程类操作一律拒绝，需人工确认{_REMOTE_RULE}
 5. 需要完整排查/出一份报告/准备面试题答案时，可用 troubleshoot / ops_report / interview_prep（多 Agent 协作，结果更全面，但会多花几次模型调用）
 
 当前可用技能：
@@ -341,6 +367,50 @@ if USE_IT_OPS:
                 },
                 "required": ["service_name"],
             },
+        },
+    ]
+
+# 第二十三课：真主机巡检工具（走 SSH 到真 Linux；没配主机就不给模型看这三个工具）
+# 和上面那套的区别：check_service 查的是 ops_demo 里的假服务，这三个查的是真主机上的真服务。
+if OPS_SSH:
+    TOOLS += [
+        {
+            "name": "remote_service",
+            "description": "巡检远端 Linux 主机上的一个 systemd 服务（只读）：运行状态、是否开机自启、pid、重启次数",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "unit": {
+                        "type": "string",
+                        "description": "systemd 服务名，如 cron、ssh.service、systemd-journald",
+                    }
+                },
+                "required": ["unit"],
+            },
+        },
+        {
+            "name": "remote_logs",
+            "description": "拉取远端主机上某个服务的 journal 日志（只读，journalctl），可按关键词过滤",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "unit": {"type": "string", "description": "systemd 服务名，如 ssh.service"},
+                    "keyword": {
+                        "type": "string",
+                        "description": "过滤关键词（忽略大小写），如 error、Failed：留空返回最近日志",
+                    },
+                    "tail_lines": {
+                        "type": "integer",
+                        "description": "最多返回几行，默认 20，上限 100",
+                    },
+                },
+                "required": ["unit"],
+            },
+        },
+        {
+            "name": "remote_health",
+            "description": "巡检远端主机整体健康状况（只读）：系统版本、运行时长与负载、内存、磁盘（按使用率倒序）、最吃 CPU 的进程",
+            "input_schema": {"type": "object", "properties": {}},
         },
     ]
 
@@ -526,6 +596,30 @@ def query_log(service_name: str, keyword: str = "", tail_lines: int = 20) -> str
         return f"查询日志失败: {exc}"
 
 
+def remote_service(unit: str) -> str:
+    """巡检远端主机上的一个 systemd 服务（只读）。异常吞成字符串。"""
+    try:
+        return remote_service_text(unit, OPS_SSH)
+    except Exception as exc:
+        return f"巡检远端服务失败: {exc}"
+
+
+def remote_logs(unit: str, keyword: str = "", tail_lines: int = 20) -> str:
+    """拉取远端服务日志（只读）。异常吞成字符串。"""
+    try:
+        return remote_logs_text(unit, keyword=keyword, tail_lines=tail_lines, runner=OPS_SSH)
+    except Exception as exc:
+        return f"拉取远端日志失败: {exc}"
+
+
+def remote_health() -> str:
+    """巡检远端主机整体健康（只读）。异常吞成字符串。"""
+    try:
+        return remote_health_text(OPS_SSH)
+    except Exception as exc:
+        return f"巡检远端主机失败: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
@@ -617,6 +711,31 @@ def execute_tool(name: str, args: dict) -> str:
         print(f"[查日志]: {service_name} keyword={keyword!r}")
         output = query_log(service_name, keyword, tail_lines)
         print(f"[日志内容]: {output[:200]}...")
+        return output
+
+    elif name == "remote_service":
+        unit = str(args.get("unit", ""))
+        print(f"[远端查服务]: {unit}")
+        output = remote_service(unit)
+        print(f"[远端服务状态]: {output}")
+        return output
+
+    elif name == "remote_logs":
+        unit = str(args.get("unit", ""))
+        keyword = str(args.get("keyword", ""))
+        try:
+            tail_lines = int(args.get("tail_lines", 20))
+        except (TypeError, ValueError):
+            tail_lines = 20
+        print(f"[远端查日志]: {unit} keyword={keyword!r}")
+        output = remote_logs(unit, keyword, tail_lines)
+        print(f"[远端日志内容]: {output[:200]}...")
+        return output
+
+    elif name == "remote_health":
+        print("[远端巡检]: 主机整体健康")
+        output = remote_health()
+        print(f"[远端健康状况]: {output[:200]}...")
         return output
 
     elif name == "troubleshoot":
@@ -968,6 +1087,10 @@ def main():
         except (KeyboardInterrupt, EOFError):
             print("\n再见！")
             break
+
+        # 兜底：万一下面的 stdin 修复没覆盖到（换终端、换平台），这里再洗一遍，
+        # 保证"孤立代理字符"进不了 messages —— 它会在 SDK 编码请求体时才炸，离现场很远。
+        user_input = sanitize(user_input)
 
         if not user_input.strip():
             continue

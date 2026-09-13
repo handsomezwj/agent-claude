@@ -31,7 +31,7 @@
 - **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
-- **自动化测试**：349 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **自动化测试**：384 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **网页版界面 + 可部署**：Flask + SSE 把命令行 Agent 包成聊天页（活动日志实时滚动 + 回答打字机）；根目录 `app.py` + `Procfile` 可直接上云，离线演示模式无需 API key、零成本
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
@@ -161,7 +161,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 │   │   ├── templates/index.html
 │   │   ├── static/            # app.js（SSE + 打字机）、style.css
 │   │   └── test_webchat.py    # 12 个 unittest
-│   ├── test_*.py          # 349 个 unittest（FakeModel，零成本）
+│   ├── test_*.py          # 384 个 unittest（FakeModel，零成本）
 │   └── knowledge.md       # RAG 默认知识库
 ├── app.py             # 云平台入口（薄壳：把 learn-agent/webchat 的 Flask app 交出去）
 ├── Procfile           # 云平台启动命令（gunicorn app:app，单 worker）
@@ -187,7 +187,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 cd learn-agent && python -m unittest discover -p "test_*.py"
 ```
 
-349 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式），以及网页版界面（离线剧本跑通完整一轮主循环 / 活动日志按整行实时推送并在 `[Agent回答]` 处封口 / 页面渲染与会话 cookie / SSE 先日志后回答）。
+384 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式），以及网页版界面（离线剧本跑通完整一轮主循环 / 活动日志按整行实时推送并在 `[Agent回答]` 处封口 / 页面渲染与会话 cookie / SSE 先日志后回答）。
 
 ## 说明
 

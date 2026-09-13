@@ -46,5 +46,49 @@ class TestJudgeAnswer(unittest.TestCase):
         self.assertIsNone(score)
 
 
+class TestJudgeThinkingOff(unittest.TestCase):
+    """裁判必须关思考——真机上踩过的坑，得有个假模型守着。
+
+    坑长这样：支持 thinking 的端点默认开思考，思考先花预算，长回答下把 1500 token
+    全烧光，只回一个 thinking 块、正文一个字不剩 → 分数静默变成 None（不报错，
+    护栏等于没生效，最难发现的那种坏）。
+    """
+
+    class RecordingJudge:
+        """记录门：把每次调用的参数记下来（跟 FakeModel 一个套路，但看得见 kwargs）。"""
+
+        def __init__(self, reject_thinking=False):
+            self.calls = []
+            self.reject_thinking = reject_thinking
+            self.messages = self      # 装成 client.messages
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            if self.reject_thinking and "thinking" in kw:
+                raise TypeError("create() got an unexpected keyword argument 'thinking'")
+            return FakeResponse("end_turn", [text_block("4/5\n还行")])
+
+    def test_judge_asks_for_thinking_disabled(self):
+        judge = self.RecordingJudge()
+        judge_answer(judge, "题目", "回答")
+        self.assertEqual(judge.calls[0].get("thinking"), {"type": "disabled"})
+
+    def test_falls_back_when_endpoint_rejects_thinking_param(self):
+        """老 SDK / 不认这个参数的端点：退回不带 thinking，照样能打分。"""
+        judge = self.RecordingJudge(reject_thinking=True)
+        score, text = judge_answer(judge, "题目", "回答")
+        self.assertEqual(score, 4)
+        self.assertEqual(len(judge.calls), 2)               # 第一次带 thinking 被拒，第二次退回
+        self.assertNotIn("thinking", judge.calls[1])
+
+    def test_other_errors_still_raise(self):
+        """只在"端点不认这个参数"时退回；真正的错（限流/鉴权）照抛，别被掩盖。"""
+        class Boom:
+            def __init__(self): self.messages = self
+            def create(self, **kw): raise RuntimeError("rate limit exceeded")
+        with self.assertRaises(RuntimeError):
+            judge_answer(Boom(), "题目", "回答")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,9 @@ def parse_score(text):
     return None
 
 
+JUDGE_MAX_TOKENS = 1500
+
+
 def judge_answer(model, task, answer, model_name=None):
     """问裁判打分。返回 (分数, 裁判原话)。分数解析失败时分数为 None。
 
@@ -56,10 +59,22 @@ def judge_answer(model, task, answer, model_name=None):
     """
     if model_name is None:
         model_name = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
-    resp = model.messages.create(
-        model=model_name,
-        max_tokens=300,
-        messages=[{"role": "user", "content": build_judge_prompt(task, answer)}],
-    )
+    prompt = build_judge_prompt(task, answer)
+    # 关掉裁判的思考：裁判只是照标准打个分，不需要推理链。而支持 thinking 的端点
+    # （如第三方兼容端点）默认开着思考，且思考按输出计费、先花预算——长回答下它会
+    # 把预算全烧在思考上，回来只有 thinking 块、正文一个字都没有，判分静默失效。
+    # 真机实测（deepseek 兼容端点）：1500 token 全花在思考上，stop_reason=max_tokens。
+    # 端点不认这个参数就退回不带（"一套代码多后端"）。
+    kw = {"model": model_name, "max_tokens": JUDGE_MAX_TOKENS,
+          "messages": [{"role": "user", "content": prompt}]}
+    try:
+        resp = model.messages.create(**kw, thinking={"type": "disabled"})
+    except TypeError:                       # 假模型 / 老 SDK 不认这个关键字
+        resp = model.messages.create(**kw)
+    except Exception as exc:                # 端点明确说不支持再退回，别的错照抛（别掩盖真问题）
+        msg = str(exc).lower()
+        if not any(w in msg for w in ("thinking", "unsupported", "unexpected", "invalid")):
+            raise
+        resp = model.messages.create(**kw)
     text = "".join(b.text for b in resp.content if b.type == "text")
     return parse_score(text), text
