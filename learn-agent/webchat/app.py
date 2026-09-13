@@ -22,7 +22,12 @@ try:                                            # 被测试当包导入（from .
 except ImportError:                             # 直接 python app.py 跑脚本（sys.path 里有本目录）
     from agent_brain import QueueSink, run_turn
 
+# .env 由 agent_brain 在导入时统一读（跟 agent-claude 同一份），所以这里 import 完环境已就绪。
 MODE = os.environ.get("AGENT_WEB_MODE", "fake").lower()     # fake（默认）/ real
+# 端口/网卡：云平台会注入 PORT，这时必须绑 0.0.0.0 才收得到外网请求；
+# 本地没给 PORT → 仍是 127.0.0.1:5001，跟以前完全一样。
+PORT = int(os.environ.get("PORT", "5001"))
+HOST = os.environ.get("HOST") or ("0.0.0.0" if "PORT" in os.environ else "127.0.0.1")
 SESSIONS: dict[str, list] = {}                              # sid -> 这段对话的消息历史
 MAX_HISTORY = 400                                           # 兜底，防无脑膨胀
 TURN_LOCK = threading.Lock()                                # 见 _run_turn_live 注释
@@ -128,7 +133,13 @@ def create_app():
 app = create_app()
 
 
-if __name__ == "__main__":
+def run_local():
+    """前台把服务跑起来（本地开发用）。云上走 gunicorn app:app，不经过这里。"""
     mode_note = "离线假脑子（脚本，零成本）" if MODE == "fake" else "真模型"
-    print(f"[webchat] 模式：{mode_note}  →  打开 http://127.0.0.1:5001")
-    app.run(host="127.0.0.1", port=5001, threaded=True)
+    shown = "127.0.0.1" if HOST == "0.0.0.0" else HOST   # 0.0.0.0 不是能打开的地址，提示里换回来
+    print(f"[webchat] 模式：{mode_note}  →  打开 http://{shown}:{PORT}")
+    app.run(host=HOST, port=PORT, threaded=True)
+
+
+if __name__ == "__main__":
+    run_local()

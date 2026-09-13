@@ -1,2 +1,4 @@
 anthropic>=0.60.0
 python-dotenv>=1.0.0
+flask>=3.0.0
+gunicorn>=21.2.0

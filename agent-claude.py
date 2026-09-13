@@ -36,7 +36,7 @@ if sys.platform == "win32":
 # 从脚本所在目录加载 .env，确保无论从哪里运行都能找到
 load_dotenv(Path(__file__).parent / ".env")
 
-# 复用"被测试过"的护栏逻辑（learn-agent/spin_guard.py，被 508 个检查保护）。
+# 复用"被测试过"的护栏逻辑（learn-agent/spin_guard.py，被 349 个检查保护）。
 # 生产项目里 spin_guard 应该是一个独立包；课程里先直接借课程目录的。
 sys.path.insert(0, str(Path(__file__).parent / "learn-agent"))
 from spin_guard import make_fingerprint, track_repeat

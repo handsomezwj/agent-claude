@@ -20,9 +20,19 @@ from pathlib import Path
 
 # webchat/ 在 learn-agent/ 下：parents[1] = learn-agent，parents[2] = agent-claude.py 所在目录
 _LEARN_AGENT = Path(__file__).resolve().parents[1]
-_AGENT_HOME = Path(__file__).resolve().parents[2]
+AGENT_HOME = Path(__file__).resolve().parents[2]     # 成品 agent 所在目录（app.py 用它找 .env）
 _DEFAULT_AGENT_PY = os.environ.get("AGENT_WEB_AGENT",
-                                   str(_AGENT_HOME / "agent-claude.py"))
+                                   str(AGENT_HOME / "agent-claude.py"))
+
+# 本地那份配置（.env，跟 agent-claude 同一份）在这里统一读进来，这样 AGENT_WEB_MODE
+# 也能写进文件里、不用每次敲命令行。override=False（默认）→ 命令行/平台注入的环境变量优先。
+# 云上通常没有这个文件 → 空操作，全靠平台的环境变量。
+try:
+    from dotenv import load_dotenv
+except ImportError:                              # 没装 python-dotenv 也能跑，只是不能写进 .env
+    load_dotenv = None
+if load_dotenv is not None:
+    load_dotenv(AGENT_HOME / ".env")
 
 
 def _ensure_learn_agent_on_path():
@@ -41,6 +51,9 @@ def _load_agent_module():
 
     加载会执行它的模块级代码：读 .env（真 key 在这台机器上）、建真 client。
     之后我们按模式覆写两个全局：client（fake 时换成假模型）、USE_STREAMING（关流式）。
+
+    云上没有 .env、没有 key：实测 anthropic SDK 允许 api_key=None 建 client（只在真发请求时
+    才报错），而 fake 模式压根不发请求，所以页面照常起、照常聊，不需要给假 key。
     """
     global _AC
     if _AC is not None:
