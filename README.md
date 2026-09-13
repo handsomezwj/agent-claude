@@ -71,6 +71,9 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 - 平台注入 `PORT` 时自动绑 `0.0.0.0`；本地不给 `PORT` 就还是 `127.0.0.1:5001`
 - **单 worker**：会话历史与"接管 stdout"是进程内状态，多 worker 会各聊各的
 - 云上默认就是离线演示模式，**不需要配 API key**，也不会有 key 泄漏或被人刷账单的风险
+- 托管平台如果不给开线程（如 PythonAnywhere 的 uWSGI，用户改不了这个选项），设
+  `AGENT_WEB_NO_THREAD=1`：改成"一轮跑完一次性推"的降级路，页面照常出结果，只是日志不逐行滚。
+  不设的话后台线程排不上队，页面会一直转圈
 
 ## 环境变量
 
@@ -109,6 +112,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 | `CLAUDE_MODEL_MID` | 标准档模型名（常规推理环用） | （空 = 用默认模型） |
 | `CLAUDE_MODEL_TOP` | 旗舰档模型名（强推理/高价值环用） | （空 = 用默认模型） |
 | `AGENT_WEB_MODE` | 网页版模式：`fake` 离线演示 / `real` 真模型 | `fake` |
+| `AGENT_WEB_NO_THREAD` | 托管平台不给开线程时设 `1`（日志改为整轮跑完一次性推） | `0` |
 | `PORT` | 网页版监听端口（云平台自动注入） | `5001` |
 | `HOST` | 网页版监听网卡（有 `PORT` 时默认 `0.0.0.0`） | 见左 |
 

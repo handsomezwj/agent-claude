@@ -9,6 +9,7 @@
 # 跑法：
 #   python app.py            # 离线假脑子（默认，零成本，页面就能聊）
 #   AGENT_WEB_MODE=real python app.py   # 连真模型（用 .env 的 key）
+#   AGENT_WEB_NO_THREAD=1 python app.py # 托管平台不给开线程时走降级路（见 NO_THREAD 注释）
 import json
 import os
 import queue
@@ -28,10 +29,19 @@ MODE = os.environ.get("AGENT_WEB_MODE", "fake").lower()     # fake（默认）/ 
 # 本地没给 PORT → 仍是 127.0.0.1:5001，跟以前完全一样。
 PORT = int(os.environ.get("PORT", "5001"))
 HOST = os.environ.get("HOST") or ("0.0.0.0" if "PORT" in os.environ else "127.0.0.1")
+# 有些托管平台的 WSGI 不开线程（PythonAnywhere 的 uWSGI 就是这样，且用户改不了）。
+# 那种环境下后台线程排不上队 → 生成器一直空等队列 → 页面永远转圈。设 1 走"降级路"：
+# 一轮跑完，日志和回答一次性推给页面（少了逐行滚，但结果正常出）。
+NO_THREAD = os.environ.get("AGENT_WEB_NO_THREAD", "").lower() in ("1", "true", "yes")
 SESSIONS: dict[str, list] = {}                              # sid -> 这段对话的消息历史
 MAX_HISTORY = 400                                           # 兜底，防无脑膨胀
 TURN_LOCK = threading.Lock()                                # 见 _run_turn_live 注释
 _SENTINEL = object()                                        # 队列里的"这轮跑完了"暗号
+
+
+def _sse(payload):
+    """一条 SSE 事件：data: <json> + 空行结尾（协议要求空行才代表一条事件结束）。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _run_turn_live(messages, message):
@@ -108,21 +118,38 @@ def create_app():
         SESSIONS.setdefault(sid, [])
         messages = SESSIONS[sid]
 
-        # agent 那一轮放到后台线程跑，它的每一行 stdout 立刻进队列；
-        # 下面的生成器一边等一边把日志**实时**推给页面（真·一条条滚，不用等整轮结束）。
-        events, outcome = _run_turn_live(messages, message)
+        # 下面生成器里必须**先**把响应头带上（X-Accel-Buffering: no 是给 nginx 类反代看的：
+        # 不加它会攒够一整块才转发，"实时"就没了）
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
-        def stream():
-            while True:
-                item = events.get()
-                if item is _SENTINEL:
-                    break
-                yield f"data: {json.dumps({'type': 'log', 'text': item}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'answer', 'text': outcome.get('reply', ''), 'code': outcome.get('code', '')}, ensure_ascii=False)}\n\n"
+        if NO_THREAD:
+            # 降级路（无线程平台，见 NO_THREAD 注释）：跑完一轮再一次性推，事件形状跟上面一样
+            logs, reply, code = run_turn(messages, message, mode=MODE)
+            if len(messages) > MAX_HISTORY:
+                del messages[:MAX_HISTORY // 2]
 
-        resp = Response(stream(), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache",
-                                 "X-Accel-Buffering": "no"})
+            def stream_once():
+                for line in logs:
+                    yield _sse({"type": "log", "text": line})
+                yield _sse({"type": "answer", "text": reply, "code": code})
+
+            resp = Response(stream_once(), mimetype="text/event-stream", headers=headers)
+        else:
+            # agent 那一轮放到后台线程跑，它的每一行 stdout 立刻进队列；
+            # 下面的生成器一边等一边把日志**实时**推给页面（真·一条条滚，不用等整轮结束）。
+            events, outcome = _run_turn_live(messages, message)
+
+            def stream():
+                while True:
+                    item = events.get()
+                    if item is _SENTINEL:
+                        break
+                    yield _sse({"type": "log", "text": item})
+                yield _sse({"type": "answer", "text": outcome.get("reply", ""),
+                            "code": outcome.get("code", "")})
+
+            resp = Response(stream(), mimetype="text/event-stream", headers=headers)
+
         if is_new:
             resp.set_cookie("sid", sid, max_age=60 * 60 * 24 * 30)
         return resp

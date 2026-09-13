@@ -18,7 +18,9 @@ _HERE = Path(__file__).resolve().parent
 _LEARN = _HERE.parent
 if str(_LEARN) not in sys.path:
     sys.path.insert(0, str(_LEARN))
-os.environ.setdefault("AGENT_WEB_MODE", "fake")   # 测试永远走离线假脑子
+# 硬设、不是 setdefault：万一 .env 里写了 AGENT_WEB_MODE=real，测试会被带成真模型
+# （真花钱 + 不稳定）。load_dotenv 默认不覆盖已存在的环境变量，所以这里硬设就锁死了。
+os.environ["AGENT_WEB_MODE"] = "fake"
 
 from webchat import agent_brain                 # noqa: E402
 from webchat.app import create_app               # noqa: E402
@@ -135,6 +137,22 @@ class ChatSseTest(unittest.TestCase):
         all_text = "\n".join(p.get("text", "") for p in parsed if p["type"] == "log")
         self.assertIn("[查服务]", all_text)
         self.assertEqual(parsed[-1]["code"], "END_TURN")
+
+        # 同一套接口在"平台不给线程"的降级路上也要能用（PythonAnywhere 的 uWSGI 不开线程，
+        # 后台线程排不上队、生成器会一直空等 → 页面永远转圈）。降级路 = 跑完一次性推，
+        # 事件形状必须一致，否则前端解析不出来。
+        app_mod = sys.modules["webchat.app"]
+        app_mod.NO_THREAD = True
+        try:
+            body = self.client.post("/api/chat",
+                                    json={"message": "order-api 好像挂了"}).get_data(as_text=True)
+        finally:
+            app_mod.NO_THREAD = False
+        parsed = [json.loads(l[5:].strip()) for l in body.splitlines() if l.startswith("data: ")]
+        self.assertEqual(parsed[0]["type"], "log")            # 日志照旧在前
+        self.assertEqual(parsed[-1]["type"], "answer")        # 回答照旧在后
+        self.assertEqual(parsed[-1]["code"], "END_TURN")
+        self.assertIn("演示模式", parsed[-1]["text"])          # 结果是完整的，不是空壳
 
     def test_chat_remembers_session(self):
         """同一 sid 两次提问，历史会累积（第二次回答引用第一次——离线剧本不真引用，但历史条数在涨）。"""
