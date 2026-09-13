@@ -14,14 +14,15 @@ import json
 import os
 import queue
 import threading
+import traceback
 import uuid
 
 from flask import Flask, Response, jsonify, make_response, render_template, request
 
 try:                                            # 被测试当包导入（from .agent_brain import …）
-    from .agent_brain import QueueSink, run_turn
+    from .agent_brain import QueueSink, run_turn, warm_up
 except ImportError:                             # 直接 python app.py 跑脚本（sys.path 里有本目录）
-    from agent_brain import QueueSink, run_turn
+    from agent_brain import QueueSink, run_turn, warm_up
 
 # .env 由 agent_brain 在导入时统一读（跟 agent-claude 同一份），所以这里 import 完环境已就绪。
 MODE = os.environ.get("AGENT_WEB_MODE", "fake").lower()     # fake（默认）/ real
@@ -44,6 +45,20 @@ def _sse(payload):
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _error_answer(exc):
+    """兜底：一轮里任何一步炸了，都把它变成一条**正常回答事件**。
+
+    为什么必须兜：异常要是抛出 WSGI 应用，托管平台会甩一个"网站出错了"的错误页给访客
+    （PythonAnywhere 上实测过：新 worker 的第一次聊天就是这样），访客看到的是平台页面，
+    既不知道发生了什么、我们也拿不到线索。兜住之后最差也是聊天框里一句"服务端开小差了"。
+    同时把完整堆栈打到 stderr —— 平台会把 stderr 收进错误日志，下次一查就知道病根。
+    """
+    traceback.print_exc()
+    return _sse({"type": "answer",
+                 "text": f"（服务端开小差了：{exc}）刷新页面再试一次就好。",
+                 "code": "SERVER_ERROR"})
+
+
 def _run_turn_live(messages, message):
     """在后台线程里跑一轮完整 agent，日志边跑边进队列。返回 (队列, 结果字典)。
 
@@ -63,7 +78,7 @@ def _run_turn_live(messages, message):
                                           log_sink=QueueSink(events.put))
                 outcome["reply"], outcome["code"] = reply, code
             except Exception as exc:            # 兜底：线程静默死掉页面会白等
-                outcome["reply"] = f"（服务端出错：{exc}）"
+                outcome["reply"] = f"（服务端开小差了：{exc}）刷新页面再试一次就好。"
                 outcome["code"] = "SERVER_ERROR"
             finally:
                 if len(messages) > MAX_HISTORY:  # 兜底：只留最近一段
@@ -123,12 +138,17 @@ def create_app():
         headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
         if NO_THREAD:
-            # 降级路（无线程平台，见 NO_THREAD 注释）：跑完一轮再一次性推，事件形状跟上面一样
-            logs, reply, code = run_turn(messages, message, mode=MODE)
-            if len(messages) > MAX_HISTORY:
-                del messages[:MAX_HISTORY // 2]
-
+            # 降级路（无线程平台，见 NO_THREAD 注释）：跑完一轮再一次性推，事件形状跟上面一样。
+            # run_turn 放在生成器**里面**跑，且自己 try 住：生成器是等服务器来迭代时才执行的，
+            # 写在外面的话这里面的异常照样会冒到平台去（那就白兜了）。
             def stream_once():
+                try:
+                    logs, reply, code = run_turn(messages, message, mode=MODE)
+                except Exception as exc:             # noqa: BLE001 —— 兜底见 _error_answer
+                    yield _error_answer(exc)
+                    return
+                if len(messages) > MAX_HISTORY:
+                    del messages[:MAX_HISTORY // 2]
                 for line in logs:
                     yield _sse({"type": "log", "text": line})
                 yield _sse({"type": "answer", "text": reply, "code": code})
@@ -137,7 +157,15 @@ def create_app():
         else:
             # agent 那一轮放到后台线程跑，它的每一行 stdout 立刻进队列；
             # 下面的生成器一边等一边把日志**实时**推给页面（真·一条条滚，不用等整轮结束）。
-            events, outcome = _run_turn_live(messages, message)
+            # 线程里那段的 try 在 _run_turn_live 里（线程一炸页面会白等，必须兜）。
+            try:
+                events, outcome = _run_turn_live(messages, message)
+            except Exception as exc:                 # noqa: BLE001 —— 连"起一轮"都失败了
+                resp = Response(iter([_error_answer(exc)]), mimetype="text/event-stream",
+                                headers=headers)
+                if is_new:
+                    resp.set_cookie("sid", sid, max_age=60 * 60 * 24 * 30)
+                return resp
 
             def stream():
                 while True:

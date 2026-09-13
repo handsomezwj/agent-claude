@@ -7,6 +7,8 @@
 #
 # 跑法（跟全套一起）：
 #   cd learn-agent && python -m unittest discover -p "test_*.py"
+import contextlib
+import io
 import json
 import os
 import sys
@@ -153,6 +155,33 @@ class ChatSseTest(unittest.TestCase):
         self.assertEqual(parsed[-1]["type"], "answer")        # 回答照旧在后
         self.assertEqual(parsed[-1]["code"], "END_TURN")
         self.assertIn("演示模式", parsed[-1]["text"])          # 结果是完整的，不是空壳
+
+        # 兜底：一轮里任何一步炸了，也必须变成一条正常的"回答"事件——不能让异常抛出 WSGI
+        # 应用（托管平台会甩一个"网站出错了"的错误页给访客，访客看到的是平台页面）。
+        def boom(*_a, **_k):
+            raise RuntimeError("模拟服务端出错")
+
+        def stream_of(patched):
+            app_mod.run_turn = patched
+            try:
+                return self.client.post("/api/chat",
+                                        json={"message": "你好"}).get_data(as_text=True)
+            finally:
+                app_mod.run_turn = real_run
+
+        real_run = app_mod.run_turn
+        with contextlib.redirect_stderr(io.StringIO()):       # 兜底会打堆栈，别污染测试输出
+            body = stream_of(boom)                            # ① 无线程降级路
+            app_mod.NO_THREAD = True
+            try:
+                body += stream_of(boom)                       # ② 线程路（起一轮就失败）
+            finally:
+                app_mod.NO_THREAD = False
+        for part in body.split("data: ")[1:]:
+            ev = json.loads(part.split("\n")[0])
+            self.assertEqual(ev["type"], "answer")
+            self.assertEqual(ev["code"], "SERVER_ERROR")
+            self.assertIn("服务端开小差", ev["text"])
 
     def test_chat_remembers_session(self):
         """同一 sid 两次提问，历史会累积（第二次回答引用第一次——离线剧本不真引用，但历史条数在涨）。"""

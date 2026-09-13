@@ -28,6 +28,11 @@ _spec.loader.exec_module(_module)
 app = _module.app                        # gunicorn app:app 要的就是它
 create_app = _module.create_app
 
+# 启动即预热：把成品 agent 模块先加载好。云上冷启动的 worker 里，第一次聊天要当场做这一串
+# 重活，实测那一下最容易出问题（PythonAnywhere 免费版新 worker 的第一次聊天会返回平台错误页）。
+# 预热失败不抛错，只是退回"第一次聊天现加载"。
+_module.warm_up()
+
 
 if __name__ == "__main__":
     # 本地也能 `python app.py` 直接跑（跟 webchat/app.py 同一个行为，不重复实现）

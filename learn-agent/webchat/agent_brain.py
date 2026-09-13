@@ -76,6 +76,24 @@ def _load_agent_module():
     return _AC
 
 
+def warm_up():
+    """预热：提前把成品 agent 模块加载好。
+
+    云上冷启动的 worker 里，第一次聊天要当场做这一整串重活（agent-claude + learn-agent
+    一整条 import 链），实测那一下最容易出问题（PythonAnywhere 免费版每个新 worker 的
+    第一次聊天会返回平台错误页，之后就正常了）。放到启动时做，等于把"第一次请求的风险"
+    换成"开机慢一秒"。
+
+    失败不抛错：预热只是优化，不该拦住服务起不来。
+    """
+    try:
+        _load_agent_module()
+        return True
+    except Exception as exc:                        # noqa: BLE001 —— 预热失败不算致命
+        print(f"[webchat] 预热失败（不影响启动，第一次聊天会现加载）：{exc}")
+        return False
+
+
 # ---------------------- 离线剧本（fake 模式的"假脑子"） ----------------------
 
 def _fake_model_for(message):
