@@ -12,3 +12,6 @@ venv/
 agent_memory.json
 *.pid
 _out.txt
+
+# 本地笔记（学习/备忘，不进仓库）
+learn-agent/README.md

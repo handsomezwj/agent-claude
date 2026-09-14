@@ -72,6 +72,7 @@ class RemoteDoorTest(unittest.TestCase):
     def test_allows_whitelisted_readonly_commands(self):
         for cmd in ("systemctl is-active cron", "journalctl -u ssh -n 20 --no-pager",
                     "uptime", "free -m", "df -h", "cat /etc/os-release",
+                    "nproc",                                   # 负载要除以核数才有意义
                     "ps -eo pid,pcpu,comm --sort=-pcpu"):
             ok, reason = screen_remote_cmd(cmd)
             self.assertTrue(ok, f"{cmd} 应放行，却被拦：{reason}")

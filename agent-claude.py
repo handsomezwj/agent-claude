@@ -62,6 +62,7 @@ from remote_ops import (
     remote_service as remote_service_text,
     runner_from_env,
 )
+from patrol import patrol_host as patrol_host_text
 from multiagent_tools import troubleshoot, ops_report, interview_prep
 from reliability import CircuitBreaker
 from observability import Tracer
@@ -144,6 +145,9 @@ OPS_DATA_DIR = os.environ.get("CLAUDE_OPS_DATA_DIR", "").strip() or str(
 # 默认关闭：不设 CLAUDE_OPS_SSH_HOST 就完全走老路，行为与以前一模一样。
 # 三道门全在 remote_ops 里：参数白名单（服务名正则）→ 客户端黑名单 → 远端命令白名单。
 OPS_SSH = runner_from_env()
+
+# 巡检清单：早班过一遍哪些服务。跟主机一样走环境变量配，没配就默认看 ssh。
+OPS_PATROL_UNITS = os.environ.get("CLAUDE_OPS_PATROL_UNITS", "ssh").strip() or "ssh"
 
 # --- 多 Agent 协作（多 Agent 专项）：流水线/主管-工人/评审团接进成品（可关：CLAUDE_USE_MULTIAGENT=false）
 # 三种模式各自内部会调模型 3~4 次（每环/每人一次），结果更全面、上下文彼此隔离；
@@ -256,6 +260,8 @@ _REMOTE_RULE = (
     "\n   - 问的是真主机时（「某个服务怎么了 / 机器健康吗」），用 remote_service / remote_logs / "
     "remote_health 走 SSH 去真 Linux 上查，拿到的是真 systemd 状态和真 journal 日志；"
     "check_service / query_log 查的是本地演示数据，两者别搞混"
+    "\n   - 问「机器有没有事 / 整体巡检一下」时用 patrol_host：它按阈值判断好坏并给出一份带结论的"
+    "报告，比逐个 remote_* 问一遍更省事；报告里已含的结论直接转述，别再自己重新判一遍"
     if OPS_SSH else ""
 )
 
@@ -411,6 +417,24 @@ if OPS_SSH:
             "name": "remote_health",
             "description": "巡检远端主机整体健康状况（只读）：系统版本、运行时长与负载、内存、磁盘（按使用率倒序）、最吃 CPU 的进程",
             "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "patrol_host",
+            "description": (
+                "值班巡检（只读）：把主机和一批服务整体过一遍，按阈值判断好坏，"
+                "直接给出一份带结论的报告（磁盘快满了/内存吃紧/负载排不上队/服务崩了）。"
+                "问「机器有没有事 / 早班巡检一下 / 帮我出一份巡检报告」时用这个；"
+                "要查具体某一个服务的细节或某段日志，才用 remote_service / remote_logs"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "units": {
+                        "type": "string",
+                        "description": "要巡检的服务名清单，逗号或空格分隔（如 ssh,nginx）。留空用配置的默认清单",
+                    },
+                },
+            },
         },
     ]
 
@@ -620,6 +644,14 @@ def remote_health() -> str:
         return f"巡检远端主机失败: {exc}"
 
 
+def patrol_host(units: str = "") -> str:
+    """值班巡检：整体过一遍，按阈值判定后给一份带结论的报告（只读）。异常吞成字符串。"""
+    try:
+        return patrol_host_text(units or OPS_PATROL_UNITS, OPS_SSH)
+    except Exception as exc:
+        return f"值班巡检失败: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
@@ -736,6 +768,13 @@ def execute_tool(name: str, args: dict) -> str:
         print("[远端巡检]: 主机整体健康")
         output = remote_health()
         print(f"[远端健康状况]: {output[:200]}...")
+        return output
+
+    elif name == "patrol_host":
+        units = str(args.get("units", "")).strip()
+        print(f"[值班巡检]: 清单={units or OPS_PATROL_UNITS}")
+        output = patrol_host(units)
+        print(f"[巡检结论]: {output.splitlines()[2] if len(output.splitlines()) > 2 else output[:120]}")
         return output
 
     elif name == "troubleshoot":

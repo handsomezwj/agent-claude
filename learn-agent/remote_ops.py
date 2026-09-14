@@ -30,6 +30,7 @@ REMOTE_ALLOW_PREFIXES: tuple[str, ...] = (
     "journalctl -u ",
     "cat /etc/os-release",
     "uptime",
+    "nproc",
     "free -m",
     "df -h",
     "ps -eo ",
@@ -101,10 +102,16 @@ def build_log_cmd(unit: str, fetch_lines: int = 200) -> str:
 
 
 def build_health_cmds() -> dict[str, str]:
-    """构造"这台机器健康吗"的四条命令：负载 / 内存 / 磁盘 / 吃 CPU 的进程。纯函数。"""
+    """构造"这台机器健康吗"的几条命令：负载 / 核数 / 内存 / 磁盘 / 吃 CPU 的进程。纯函数。
+
+    为什么要问核数（nproc）：**负载数字本身没有好坏，要除以核数才有**。
+    负载 4.0 在 2 核机器上是严重过载（活儿排了两倍队），在 16 核机器上屁事没有。
+    只看数字不看核数，是新手最容易犯的判断错误。
+    """
     return {
         "os": "cat /etc/os-release",
         "uptime": "uptime",
+        "cores": "nproc",
         "free": "free -m",
         "df": "df -h",
         "ps": "ps -eo pid,pcpu,pmem,etime,comm --sort=-pcpu",
@@ -112,6 +119,75 @@ def build_health_cmds() -> dict[str, str]:
 
 
 # ---------------------- 输出解析（纯函数，离线可测） ----------------------
+
+def _to_int(text, default: int = 0) -> int:
+    """宽容地把一段文本变成整数。读不懂就返回默认值，绝不抛异常（远端输出不可信）。纯函数。"""
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# 下面这三个 read_* 是"读原始数字"，上面的 parse_* 是"读成人话"。
+# 为什么要分两层：**判断好坏要的是数字，说给人听要的是人话**。
+# 比如"磁盘 92%"——判断要不要告警得比大小，讲给用户听得说"快满了"。
+# 两件事分开做，但底层解析只写一遍（parse_* 就是调 read_* 再包装）。
+
+def read_mem(out: str) -> dict:
+    """从 free -m 的输出里读出原始数字（单位 MB）。读不到就返回空字典。纯函数。
+
+    两个运维常识藏在这里：
+      · 看内存够不够，看的是 available（还能拿来用的），不是 free（完全没占的）。
+        Linux 会"闲着也是闲着"，把没用的内存拿去当磁盘缓存——所以 free 常年很小，
+        但那是缓存，一有程序要内存立刻还给它。盯着 free 会天天虚惊。
+      · swap 被用起来（used > 0）才说明真紧张：内存不够了，系统把数据挪到硬盘上，
+        而硬盘比内存慢几个数量级，所以一旦开始 swap，机器会明显变卡。
+    """
+    info: dict = {}
+    for line in (out or "").splitlines():
+        cols = line.split()
+        if not cols:
+            continue
+        if cols[0] == "Mem:" and len(cols) >= 4:
+            info["total"] = _to_int(cols[1])
+            info["used"] = _to_int(cols[2])
+            info["free"] = _to_int(cols[3])
+            # 第 7 列才是 available（老版本 free 没这列，退回 free）
+            info["available"] = _to_int(cols[6], info["free"]) if len(cols) >= 7 else info["free"]
+        elif cols[0] == "Swap:" and len(cols) >= 3:
+            info["swap_total"] = _to_int(cols[1])
+            info["swap_used"] = _to_int(cols[2])
+    return info
+
+
+def read_load(out: str):
+    """从 uptime 的输出里读出 1/5/15 分钟负载，返回三元组；读不到返回 None。纯函数。"""
+    m = re.search(r"load average:\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)", out or "")
+    if not m:
+        return None
+    try:
+        return (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+    except ValueError:
+        return None
+
+
+def read_df_rows(out: str) -> list:
+    """把 df -h 每一行读成一个字典：{fs, size, used, use_pct, mount}。纯函数。
+
+    按列位置取（不是在算大小），所以"3.4G / 92%"这种给人看的格式照样能读出 92 这个数。
+    """
+    rows = []
+    for line in (out or "").splitlines()[1:]:          # 第一行是表头
+        cols = line.split()
+        if len(cols) >= 6 and cols[4].endswith("%"):
+            try:
+                pct = int(cols[4].rstrip("%"))
+            except ValueError:
+                continue
+            rows.append({"fs": cols[0], "size": cols[1], "used": cols[2],
+                         "use_pct": pct, "mount": " ".join(cols[5:])})
+    return rows
+
 
 _ACTIVE_CN = {
     "active": "运行中",
@@ -140,46 +216,43 @@ def parse_show(out: str) -> dict[str, str]:
     return info
 
 
-def parse_uptime(out: str) -> str:
-    """从 uptime 输出里抠出"已经跑了多久"和"负载"。纯函数，可测。"""
+def parse_uptime(out: str, cores: int | None = None) -> str:
+    """从 uptime 输出里抠出"已经跑了多久"和"负载"。纯函数，可测。
+
+    知道核数时，顺手把负载换算成"每核负载"——这才是有意义的那个数（见 build_health_cmds）。
+    """
     text = (out or "").strip()
     if not text:
         return ""
     m = re.search(r"up\s+(.+?),\s+\d+\s+user", text)
     up = m.group(1).strip() if m else ""
-    load = text.split("load average:")[-1].strip() if "load average:" in text else ""
+    load = read_load(text)
+    load_text = "/".join(f"{v:.2f}" for v in load) if load else ""
     parts = []
     if up:
         parts.append(f"已运行 {up}")
-    if load:
-        parts.append(f"负载（1/5/15 分钟）{load}")
+    if load_text:
+        extra = f"（{cores} 核，每核 {load[0] / cores:.2f}）" if cores else ""
+        parts.append(f"负载（1/5/15 分钟）{load_text}{extra}")
     return "，".join(parts)
 
 
 def parse_free(out: str) -> str:
     """从 free -m 输出里抠出内存总量/已用/可用（MB）。纯函数，可测。"""
-    for line in (out or "").splitlines():
-        if line.strip().startswith("Mem:"):
-            nums = line.split()[1:]
-            if len(nums) >= 3:
-                total, used, free = nums[0], nums[1], nums[2]
-                # 第 6 列是 available（真正还能用的量），有就一并报出来
-                avail = nums[5] if len(nums) >= 6 else free
-                return f"内存 {used}/{total} MB 已用，可用 {avail} MB"
-    return ""
+    m = read_mem(out)
+    if not m or "total" not in m:
+        return ""
+    return f"内存 {m['used']}/{m['total']} MB 已用，可用 {m['available']} MB"
 
 
 def parse_df(out: str, max_rows: int = 6) -> str:
     """从 df -h 输出里抠出各挂载点的使用率，挑最满的几行报出来。纯函数，可测。"""
-    rows = []
-    for line in (out or "").splitlines()[1:]:
-        cols = line.split()
-        if len(cols) >= 6 and cols[4].endswith("%"):
-            rows.append((cols[4], cols[5], cols[1], cols[2]))  # 使用率/挂载点/总量/已用
+    rows = read_df_rows(out)
     if not rows:
         return ""
-    rows.sort(key=lambda r: float(r[0].rstrip("%")), reverse=True)
-    shown = "；".join(f"{mnt} {use}（{used}/{size}）" for use, mnt, size, used in rows[:max_rows])
+    rows.sort(key=lambda r: r["use_pct"], reverse=True)
+    shown = "；".join(f"{r['mount']} {r['use_pct']}%（{r['used']}/{r['size']}）"
+                      for r in rows[:max_rows])
     return f"磁盘使用率最高：{shown}"
 
 
@@ -419,7 +492,7 @@ def remote_health(runner) -> str:
         return f"远端主机 {getattr(runner, 'host', '?')} 不可达：可能没开机，或网络/密钥不对"
     cmds = build_health_cmds()
     out = {}
-    for k in ("os", "uptime", "free", "df", "ps"):
+    for k in ("os", "uptime", "cores", "free", "df", "ps"):
         rc, text = runner.run(cmds[k])
         if rc == 255:
             return text
@@ -428,13 +501,20 @@ def remote_health(runner) -> str:
     for line in (out["os"] or "").splitlines():
         if line.startswith("PRETTY_NAME="):
             os_name = line.split("=", 1)[1].strip().strip('"')
+    # 核数拿不到就是 None（老机器没 nproc、命令被拦等）——不编一个默认值糊弄，
+    # 后面 parse_uptime 会老老实实只报原始负载，不报"每核"。
+    cores = None
+    first = (out.get("cores") or "").strip().splitlines()
+    if first and _to_int(first[0]) > 0:
+        cores = _to_int(first[0])
     bits = []
     if os_name:
         bits.append(f"系统 {os_name}")
     for key in ("uptime", "free", "df", "ps"):
-        parsed = {"uptime": parse_uptime, "free": parse_free}.get(key)
-        if parsed:
-            text = parsed(out[key])
+        if key == "uptime":
+            text = parse_uptime(out[key], cores=cores)
+        elif key == "free":
+            text = parse_free(out[key])
         elif key == "df":
             text = parse_df(out[key])
         else:

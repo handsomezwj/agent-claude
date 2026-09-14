@@ -16,6 +16,8 @@
   - `interview_prep` — 多 Agent 评审团（同一道题多角度专家回答 + 主席汇总满分答案）
 - **SkillLoader 技能系统**：`skills/` 目录下 Markdown 知识库自动加载，按需注入
 - **IT 运维工具集（业务场景）**：只读诊断 + 安全护栏。`check_service`/`query_log` 做服务排查与日志取证，破坏性操作（删文件/杀进程/重启）由护栏**明确拒绝、需人工确认**，可在企业场景安全落地（`CLAUDE_USE_IT_OPS` 可关）
+- **真机只读巡检（SSH）**：不止于演示数据——通过系统 `ssh` 客户端连**真实 Linux 主机**做只读诊断，取到的是真 `systemctl` 服务状态与真 `journalctl` 系统日志（`remote_service` / `remote_logs` / `remote_health`）。**三道门**收紧权限：① 参数层服务名正则白名单（拒绝 `-` 开头，挡选项注入）② 客户端破坏性命令黑名单 ③ **远端命令白名单**（固定前缀放行 + 禁止 `; | & $ \` > <` 与换行）——黑名单挡"能想到的坏写法"，白名单挡"**没想到的坏写法**"。命令构造**绝不在远端拼管道**：日志整段拉回（上限 500 行）在本地筛，注入面最小化；主机不可达（下游会挂）优雅降级为可读说明，不抛异常拖垮主循环。**未配 `CLAUDE_OPS_SSH_HOST` 时这些工具完全不出现**，行为与不启用前一致
+- **值班巡检（主动判断，不只取数）**：运维每天上班第一件事——把机器整体过一遍，最后给一句结论。`patrol_host` 按阈值把指标判成四档（严重/警告/提示/正常），输出**结论先行**的巡检报告。三个新手必踩的误判都处理了：**负载按核数归一**（同一个 4.0，2 核是过载、16 核是清闲）、**内存以 `available` 为准而非 `free`**（Linux 把空闲内存当缓存，真紧张的表现是开始用 swap）、**过滤非本机挂载点**（容器/WSL 里能 `df` 到宿主机盘与只读镜像，把别人的盘算成自己的就是天天误报的根源——且被跳过的会**明写在报告里**，跳过但不装作看过）。判断伦理：拿不到核数就明说"不下结论"，主机连不上就出"**本次巡检没有结论**"而非"正常"（`CLAUDE_OPS_PATROL_UNITS` 配置清单）
 - **多 Agent 协作**：三种协作模式封装成工具，模型对象是可注入的「门」——测试用假模型零成本、生产换真模型；任一环节失败优雅降级返回说明，不拖垮主循环（`CLAUDE_USE_MULTIAGENT` 可关）
 - **企业级加固 · 可靠性层**：真实下游会挂——**重试**（指数退避扛瞬时抖动）+ **超时**（线程限时防傻等）+ **熔断**（保险丝状态机防雪崩，冷却后试探恢复）；`HardenedAgent` 透明包装接入每条多 Agent 模型调用，协调器无感（`CLAUDE_USE_RELIABILITY` 可关、次数/阈值/冷却可调）
 - **企业级加固 · 可观测性层**：每次多 Agent 协作自动留一份 trace「病历」（谁/状态/耗时，嵌套 span 树），控制台打印 + 可落盘回放，一眼定位哪一环慢/挂/被熔断挡住；病历只打印不污染返回文本（`CLAUDE_USE_TRACE` 可关、`CLAUDE_TRACE_FILE` 存档）
@@ -31,7 +33,7 @@
 - **RAG 检索增强**：词袋向量 + bge 中文向量模型语义检索，同义词可召回（如"番茄"搜得到"西红柿"），有效抑制模型幻觉
 - **长记忆**：JSON 记事本持久化关键事实，重启不忘；记忆自动提取并注入 System Prompt（`CLAUDE_USE_MEMORY` 可关）
 - **多端点兼容**：`ANTHROPIC_BASE_URL` 统一入口，一套代码切换 Anthropic 官方 / DeepSeek / 第三方兼容端点
-- **自动化测试**：384 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
+- **自动化测试**：430 个 unittest 全绿，自研 FakeModel 假模型替身，零成本回归验证全部护栏
 - **网页版界面 + 可部署**：Flask + SSE 把命令行 Agent 包成聊天页（活动日志实时滚动 + 回答打字机）；根目录 `app.py` + `Procfile` 可直接上云，离线演示模式无需 API key、零成本
 - **工程适配**：Windows 中文环境 GBK/UTF-8 编码修复、lone surrogate 清理、启动配置诊断
 
@@ -100,6 +102,12 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 | `CLAUDE_MEMORY_MAX_ITEMS` | 记忆最多保留条数 | `50` |
 | `CLAUDE_USE_IT_OPS` | 是否启用 IT 运维助手（服务检查/日志查询/安全护栏） | `true` |
 | `CLAUDE_OPS_DATA_DIR` | 运维演示数据目录（services.json / app.log） | `learn-agent/ops_demo` |
+| `CLAUDE_OPS_SSH_HOST` | 真机巡检的远端主机（**空 = 不启用**，`remote_*` / `patrol_host` 工具不出现） | （空） |
+| `CLAUDE_OPS_SSH_USER` | 远端登录用户 | `root` |
+| `CLAUDE_OPS_SSH_KEY` | 私钥路径（支持 `~`，只认密钥登录） | `~/.ssh/id_ed25519` |
+| `CLAUDE_OPS_SSH_PORT` | SSH 端口 | `22` |
+| `CLAUDE_OPS_SSH_WAKE` | 连之前先跑的本机命令（靶机是 WSL 等会被回收的环境时用来唤醒） | （空） |
+| `CLAUDE_OPS_PATROL_UNITS` | 值班巡检的服务清单（逗号/空格分隔，如 `ssh,cron`） | `ssh` |
 | `CLAUDE_USE_MULTIAGENT` | 是否启用多 Agent 协作工具（流水线/主管-工人/评审团） | `true` |
 | `CLAUDE_USE_RELIABILITY` | 多 Agent 工具模型调用是否包上熔断 + 重试 | `true` |
 | `CLAUDE_MODEL_RETRIES` | 单条模型调用重试次数（指数退避） | `2` |
@@ -153,6 +161,10 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 │   ├── async_utils.py     # 异步编程（并发 gather / 限流 Semaphore）
 │   ├── itops_guard.py     # IT 运维安全护栏（命令黑名单 / 路径护栏 / 服务三态，纯函数可测）
 │   ├── 21-itops.py        # IT 运维专项示例（离线剧本演示护栏）
+│   ├── remote_ops.py      # 真机只读巡检：SSH 取数层（三道门 / 六个解析器 / 兜底唤醒 / 可注入 runner）
+│   ├── 28-remote-ops.py   # 真机巡检示例（默认离线假 SSH，`--real` 连真主机）
+│   ├── patrol.py          # 值班巡检：判断层（阈值四档分级 / 结论先行报告 / 误报过滤）
+│   ├── 29-patrol.py       # 值班巡检示例（含一台"有病"的主机，`--real` 连真主机）
 │   ├── ops_demo/          # 运维演示数据（services.json 服务注册表 + app.log 故障现场 + demo_service.py）
 │   ├── *.py               # 每个能力的可运行示例
 │   ├── webchat/           # 网页版对话界面（Flask + SSE；agent 主循环当模块复用）
@@ -161,7 +173,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 │   │   ├── templates/index.html
 │   │   ├── static/            # app.js（SSE + 打字机）、style.css
 │   │   └── test_webchat.py    # 12 个 unittest
-│   ├── test_*.py          # 384 个 unittest（FakeModel，零成本）
+│   ├── test_*.py          # 430 个 unittest（FakeModel，零成本）
 │   └── knowledge.md       # RAG 默认知识库
 ├── app.py             # 云平台入口（薄壳：把 learn-agent/webchat 的 Flask app 交出去）
 ├── Procfile           # 云平台启动命令（gunicorn app:app，单 worker）
@@ -176,6 +188,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 - 手写工具调用循环（`stop_reason` 驱动多轮自主编排）
 - 四层护栏：最大轮数兜底 / 打转检测 / 上下文裁剪 + 摘要压缩 / LLM 质量裁判
 - 流式输出、MCP 协议、RAG 检索（词袋向量 + bge 语义向量）、真向量模型、长记忆持久化、异步编程、IT 运维排障（只读诊断 + 安全护栏）
+- 真机只读巡检（SSH 连真实 Linux 主机取真 systemd / 真 journal，三道门收紧权限）与**值班巡检**（按阈值判好坏、出结论先行的报告；负载归一核数、内存看 available、过滤他机挂载点三个误判点都有测试兜着）——**取数与判断分层**，各管一摊
 - 多 Agent 协作：流水线排障（诊断→根因→方案接力）、主管-工人（拆活 + 汇总）、评审团（多角度专家 + 主席汇总）三种模式，统一封装成工具接进成品
 - 企业级加固：可靠性层（重试 / 超时 / 熔断）与可观测性层（trace 病历）透明包装每条多 Agent 模型调用——真实下游会挂、挂了能自愈、事后查得清；分级模型按角色档位给不同环发不同模型名，机械环降档省钱、推理环用旗舰不掉质量
 
@@ -187,7 +200,7 @@ web: gunicorn app:app --workers 1 --threads 8 --timeout 300 --worker-class gthre
 cd learn-agent && python -m unittest discover -p "test_*.py"
 ```
 
-384 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式），以及网页版界面（离线剧本跑通完整一轮主循环 / 活动日志按整行实时推送并在 `[Agent回答]` 处封口 / 页面渲染与会话 cookie / SSE 先日志后回答）。
+430 个 unittest 全绿。测试不调用真实 API：用自研 FakeModel 假模型替身，几秒跑完、零成本。覆盖：命令黑名单（管道/分号拼接、大小写、`mkfs.*` 变体）、`../` 路径越权、日志越权拦截、服务三态、demo_service 生命周期、多 Agent 三种协作模式（流水线三环顺序 / 主管汇总占位 / 评审团多角度汇总）与优雅降级，以及企业级加固：可靠性（重试退避次数 / 熔断状态机跳闸与恢复 / 超时拦截）、可观测性（trace 嵌套父子与异常标错 / 病历存档回放一致）与分级模型（三工具各角色发各档模型名 / 档位→模型名缺失回退 / 成本省钱比例算式），以及网页版界面（离线剧本跑通完整一轮主循环 / 活动日志按整行实时推送并在 `[Agent回答]` 处封口 / 页面渲染与会话 cookie / SSE 先日志后回答）。
 
 ## 说明
 
